@@ -1,12 +1,222 @@
-import { drizzle } from "drizzle-orm/neon-serverless";
-import { neon } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/postgres-js";
+import postgres from "postgres";
 import * as schema from "@shared/schema";
-import { eq } from "drizzle-orm";
+import { and, eq, isNull } from "drizzle-orm";
 
-const sql = neon(process.env.DATABASE_URL!);
-const db = drizzle(sql, { schema });
+// Use raw postgres connection for better compatibility
+const client = postgres(process.env.DATABASE_URL || "", {
+  ssl: process.env.NODE_ENV === "production" ? "require" : false,
+});
+
+const db = drizzle(client, { schema });
+
+function normalizeStatusName(statusDescription: string) {
+  return statusDescription.trim().toLowerCase();
+}
 
 export const storage = {
+  // Initialize
+  async initialize() {
+    try {
+      const defaultPlayerStatuses = [
+        { validatePlayerStatusId: 1, description: "Diamond" },
+        { validatePlayerStatusId: 2, description: "Gold" },
+        { validatePlayerStatusId: 3, description: "Silver" },
+        { validatePlayerStatusId: 4, description: "Bronze" },
+        { validatePlayerStatusId: 5, description: "Elite" },
+      ];
+
+      const existingStatuses = await db.select().from(schema.ValidatePlayerStatus);
+      const existingStatusById = new Map(
+        existingStatuses.map((status) => [status.validatePlayerStatusId, status]),
+      );
+
+      for (const status of defaultPlayerStatuses) {
+        const existingStatus = existingStatusById.get(status.validatePlayerStatusId);
+        if (!existingStatus) {
+          await db.insert(schema.ValidatePlayerStatus).values(status);
+          continue;
+        }
+
+        if (existingStatus.description !== status.description) {
+          await db
+            .update(schema.ValidatePlayerStatus)
+            .set({ description: status.description })
+            .where(eq(schema.ValidatePlayerStatus.validatePlayerStatusId, status.validatePlayerStatusId));
+        }
+      }
+
+      const defaultStatusRuleByStatusId: Record<number, { basePrice: number; maxPerTeam: number | null }> = {
+        1: { basePrice: 100, maxPerTeam: 1 },
+        2: { basePrice: 70, maxPerTeam: 2 },
+        3: { basePrice: 40, maxPerTeam: null },
+        4: { basePrice: 20, maxPerTeam: null },
+        5: { basePrice: 0, maxPerTeam: 1 },
+      };
+
+      const existingStatusRules = await db.select().from(schema.playerStatusRules);
+      const existingStatusRuleByStatusId = new Map(
+        existingStatusRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
+      );
+
+      for (const status of defaultPlayerStatuses) {
+        const defaultRule = defaultStatusRuleByStatusId[status.validatePlayerStatusId];
+        if (!defaultRule) continue;
+
+        const existingRule = existingStatusRuleByStatusId.get(status.validatePlayerStatusId);
+        if (!existingRule) {
+          await db.insert(schema.playerStatusRules).values({
+            validatePlayerStatusId: status.validatePlayerStatusId,
+            basePrice: defaultRule.basePrice,
+            maxPerTeam: defaultRule.maxPerTeam,
+          });
+        }
+      }
+
+      const setup = await db.select().from(schema.setup).limit(1);
+      if (!setup.length) {
+        // Create default setup record
+        await db.insert(schema.setup).values({
+          teamCount: 2,
+          budgetPerTeam: 500,
+          password: "appl2026",
+        });
+        console.log("Initialized setup with default password: appl2026");
+      }
+
+      await this.backfillCaptainsEliteStatus();
+    } catch (error) {
+      console.error("Failed to initialize setup:", error);
+    }
+  },
+
+  async getPlayerStatuses() {
+    return await db
+      .select()
+      .from(schema.ValidatePlayerStatus)
+      .orderBy(schema.ValidatePlayerStatus.validatePlayerStatusId);
+  },
+
+  async getPlayerStatusRules() {
+    const [playerStatuses, statusRules] = await Promise.all([
+      this.getPlayerStatuses(),
+      db.select().from(schema.playerStatusRules),
+    ]);
+
+    const statusRuleByStatusId = new Map(
+      statusRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
+    );
+
+    return playerStatuses.map((playerStatus) => {
+      const statusRule = statusRuleByStatusId.get(playerStatus.validatePlayerStatusId);
+      return {
+        ...playerStatus,
+        basePrice: statusRule?.basePrice ?? 0,
+        maxPerTeam: statusRule?.maxPerTeam ?? null,
+      };
+    });
+  },
+
+  async updatePlayerStatusRules(
+    updates: Array<{
+      validatePlayerStatusId: number;
+      basePrice?: number;
+      maxPerTeam?: number | null;
+    }>,
+  ) {
+    if (updates.length === 0) {
+      return this.getPlayerStatusRules();
+    }
+
+    const existingRules = await db.select().from(schema.playerStatusRules);
+    const existingRuleByStatusId = new Map(
+      existingRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
+    );
+
+    for (const update of updates) {
+      const setData: { basePrice?: number; maxPerTeam?: number | null } = {};
+      if (update.basePrice !== undefined) setData.basePrice = update.basePrice;
+      if (update.maxPerTeam !== undefined) setData.maxPerTeam = update.maxPerTeam;
+
+      const existingRule = existingRuleByStatusId.get(update.validatePlayerStatusId);
+      if (!existingRule) {
+        await db.insert(schema.playerStatusRules).values({
+          validatePlayerStatusId: update.validatePlayerStatusId,
+          basePrice: setData.basePrice ?? 0,
+          maxPerTeam: setData.maxPerTeam ?? null,
+        });
+        continue;
+      }
+
+      if (Object.keys(setData).length > 0) {
+        await db
+          .update(schema.playerStatusRules)
+          .set(setData)
+          .where(eq(schema.playerStatusRules.validatePlayerStatusId, update.validatePlayerStatusId));
+
+        if (setData.basePrice !== undefined) {
+          await db
+            .update(schema.players)
+            .set({ basePrice: setData.basePrice })
+            .where(
+              and(
+                eq(schema.players.validatePlayerStatusId, update.validatePlayerStatusId),
+                isNull(schema.players.soldTo),
+              ),
+            );
+        }
+      }
+    }
+
+    return this.getPlayerStatusRules();
+  },
+
+  async assignCaptainEliteStatus(captainUsername: string) {
+    const normalizedCaptainUsername = captainUsername?.trim().toLowerCase();
+    if (!normalizedCaptainUsername) return;
+
+    const [playerStatuses, statusRules] = await Promise.all([
+      this.getPlayerStatuses(),
+      this.getPlayerStatusRules(),
+    ]);
+
+    const eliteStatus = playerStatuses.find(
+      (playerStatus) => normalizeStatusName(playerStatus.description) === "elite",
+    );
+    if (!eliteStatus) return;
+
+    const eliteStatusRule = statusRules.find(
+      (statusRule) => statusRule.validatePlayerStatusId === eliteStatus.validatePlayerStatusId,
+    );
+    const eliteBasePrice = eliteStatusRule?.basePrice ?? 0;
+
+    const players = await db.select().from(schema.players);
+    const captainPlayers = players.filter(
+      (player) => player.name.toLowerCase() === normalizedCaptainUsername,
+    );
+
+    for (const captainPlayer of captainPlayers) {
+      if (
+        captainPlayer.validatePlayerStatusId !== eliteStatus.validatePlayerStatusId ||
+        captainPlayer.basePrice !== eliteBasePrice
+      ) {
+        await db.update(schema.players)
+          .set({
+            validatePlayerStatusId: eliteStatus.validatePlayerStatusId,
+            basePrice: eliteBasePrice,
+          })
+          .where(eq(schema.players.id, captainPlayer.id));
+      }
+    }
+  },
+
+  async backfillCaptainsEliteStatus() {
+    const teams = await this.getTeams();
+    for (const team of teams) {
+      await this.assignCaptainEliteStatus(team.ownerName);
+    }
+  },
+
   // Password validation
   async validatePassword(password: string): Promise<boolean> {
     const setup = await db.select().from(schema.setup).limit(1);
@@ -38,7 +248,7 @@ export const storage = {
     return await db.select().from(schema.players).orderBy(schema.players.id);
   },
 
-  async createPlayer(data: typeof schema.insertPlayerSchema._type) {
+  async createPlayer(data: typeof schema.players.$inferInsert) {
     const inserted = await db.insert(schema.players).values(data).returning();
     return inserted[0];
   },
@@ -60,7 +270,12 @@ export const storage = {
     return await db.select().from(schema.teams).orderBy(schema.teams.id);
   },
 
-  async createTeam(data: typeof schema.insertTeamSchema._type) {
+  async getTeamByUsername(username: string, _password: string) {
+    const teams = await db.select().from(schema.teams);
+    return teams.find((team) => team.ownerName.toLowerCase() === username.toLowerCase()) ?? null;
+  },
+
+  async createTeam(data: typeof schema.teams.$inferInsert) {
     const inserted = await db.insert(schema.teams).values(data).returning();
     return inserted[0];
   },
@@ -71,6 +286,14 @@ export const storage = {
       .where(eq(schema.teams.id, id))
       .returning();
     return updated[0] || null;
+  },
+
+  async deleteTeam(id: number) {
+    await db.update(schema.players)
+      .set({ soldTo: null, soldAmount: null, status: "available" })
+      .where(eq(schema.players.soldTo, id));
+
+    await db.delete(schema.teams).where(eq(schema.teams.id, id));
   },
 
   // Auction

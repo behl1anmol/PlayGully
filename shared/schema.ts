@@ -1,6 +1,12 @@
 import { pgTable, serial, text, integer, boolean, jsonb } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 
+export type AuthSession = {
+  role: "admin" | "captain" | "guest";
+  teamId?: number;
+  teamName?: string;
+};
+
 export const setup = pgTable("setup", {
   id: serial("id").primaryKey(),
   teamCount: integer("team_count").notNull(),
@@ -8,11 +14,27 @@ export const setup = pgTable("setup", {
   password: text("password").notNull().default("admin123"),
 });
 
+export const ValidatePlayerStatus = pgTable("ValidatePlayerStatus", {
+  validatePlayerStatusId: integer("ValidatePlayerStatusID").primaryKey(),
+  description: text("Description").notNull().unique(),
+});
+
+export const playerStatusRules = pgTable("player_status_rules", {
+  id: serial("id").primaryKey(),
+  validatePlayerStatusId: integer("ValidatePlayerStatusID")
+    .notNull()
+    .references(() => ValidatePlayerStatus.validatePlayerStatusId)
+    .unique(),
+  basePrice: integer("base_price").notNull(),
+  maxPerTeam: integer("max_per_team"),
+});
+
 export const players = pgTable("players", {
   id: serial("id").primaryKey(),
   name: text("name").notNull(),
   role: text("role").notNull(), // batsman, bowler, allrounder, wicketkeeper
   basePrice: integer("base_price").notNull(),
+  validatePlayerStatusId: integer("ValidatePlayerStatusID").references(() => ValidatePlayerStatus.validatePlayerStatusId),
   status: text("status").notNull().default("available"), // available, sold, unsold
   soldTo: integer("sold_to"),
   soldAmount: integer("sold_amount"),
@@ -37,3 +59,22 @@ export const auctionState = pgTable("auction_state", {
 
 export const insertPlayerSchema = createInsertSchema(players).omit({ id: true, status: true, soldTo: true, soldAmount: true });
 export const insertTeamSchema = createInsertSchema(teams).omit({ id: true });
+
+export type Setup = typeof setup.$inferSelect;
+export type Player = typeof players.$inferSelect & {
+  teamId?: number | null;
+  soldPrice?: number | null;
+  playerStatusDescription?: string | null;
+};
+export type Team = typeof teams.$inferSelect & {
+  budget?: number;
+  spent?: number;
+  captainUsername?: string;
+};
+export type AuctionState = {
+  phase: "setup" | "auction" | "completed";
+  currentPlayerIndex: number;
+  currentBid: number;
+  currentBidderId: number | null;
+  playerOrder: number[];
+};

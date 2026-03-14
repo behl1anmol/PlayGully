@@ -220,6 +220,11 @@ export default function AuctionPage() {
               <h2 className="text-xl font-bold" data-testid="text-current-player-name">
                 {currentPlayer.name}
               </h2>
+              {(currentPlayer as any).playerStatusDescription && (
+                <Badge variant="outline" className="mt-2">
+                  {(currentPlayer as any).playerStatusDescription}
+                </Badge>
+              )}
               <p className="text-sm text-muted-foreground mt-0.5">
                 Base price: ₹{currentPlayer.basePrice}
               </p>
@@ -413,6 +418,11 @@ export default function AuctionPage() {
                               {j + 1}.
                             </span>
                             <span>{player.name}</span>
+                            {(player as any).playerStatusDescription && (
+                              <Badge variant="outline" className="text-[10px] font-normal px-1.5 py-0">
+                                {(player as any).playerStatusDescription}
+                              </Badge>
+                            )}
                           </div>
                           <span className="text-xs text-muted-foreground">
                             ₹{player.soldPrice}

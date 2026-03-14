@@ -16,8 +16,16 @@ await build({
   platform: "node",
   target: "node20",
   outfile: path.resolve(__dirname, "../dist/index.js"),
-  external: ["@neondatabase/serverless"],
   format: "esm",
+  external: [
+    "express",
+    "drizzle-orm",
+    "@neondatabase/serverless",
+    "drizzle-orm/neon-serverless",
+    "drizzle-orm/postgres-js",
+    "postgres",
+    "vite",
+  ],
 });
 
 console.log("Build complete!");

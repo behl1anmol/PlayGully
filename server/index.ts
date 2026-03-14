@@ -2,9 +2,44 @@ import express, { type Request, Response, NextFunction } from "express";
 import { registerRoutes } from "./routes";
 import { setupVite, serveStatic } from "./vite";
 
+// Simple cookie parser middleware
+function cookieParser(req: any, res: any, next: any) {
+  const cookies: Record<string, string> = {};
+  if (req.headers.cookie) {
+    req.headers.cookie.split(';').forEach((cookie: string) => {
+      const [key, val] = cookie.trim().split('=');
+      cookies[key] = decodeURIComponent(val);
+    });
+  }
+  req.cookies = cookies;
+  
+  // Override res.cookie to set cookies
+  const originalCookie = res.cookie;
+  res.cookie = function(name: string, value: string, options: any = {}) {
+    let setCookieValue = `${name}=${encodeURIComponent(value)}`;
+    if (options.maxAge) {
+      setCookieValue += `; Max-Age=${options.maxAge}`;
+    }
+    if (options.httpOnly) {
+      setCookieValue += '; HttpOnly';
+    }
+    if (options.secure) {
+      setCookieValue += '; Secure';
+    }
+    if (options.sameSite) {
+      setCookieValue += `; SameSite=${options.sameSite}`;
+    }
+    res.setHeader('Set-Cookie', setCookieValue);
+    return this;
+  };
+  
+  next();
+}
+
 const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
+app.use(cookieParser);
 
 app.use((req, res, next) => {
   const start = Date.now();
