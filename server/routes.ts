@@ -1,16 +1,31 @@
-import type { Express } from "express";
+import crypto from "crypto";
+import type { Express, Request } from "express";
 import { createServer, type Server } from "http";
 import { storage } from "./storage";
 import { insertPlayerSchema, insertTeamSchema } from "@shared/schema";
 import { z } from "zod";
 
-type AuctionPhase = "setup" | "auction" | "completed";
+type AuctionPhase = "setup" | "auction" | "paused" | "completed";
+type AuctionMode = "none" | "live" | "instant";
 type PlayerStatusRule = {
   validatePlayerStatusId: number;
   description: string;
   basePrice: number;
   maxPerTeam: number | null;
 };
+
+type AuthSessionPayload = {
+  role: "admin" | "captain" | "guest";
+  teamId?: number;
+  teamName?: string;
+  iat: number;
+  exp: number;
+};
+
+const SESSION_COOKIE_NAME = "appl_session";
+const SESSION_TTL_SECONDS = 60 * 60 * 12;
+const SESSION_SECRET = process.env.SESSION_SECRET || "appl-dev-secret-change-me";
+const INSTANT_LOCK_DURATION_SECONDS = 180;
 
 function normalizeStatusName(statusDescription: string) {
   return statusDescription.trim().toLowerCase();
@@ -37,8 +52,112 @@ function findStatusRuleByNames(statusRules: PlayerStatusRule[], names: string[])
 
 function toAuctionPhase(status?: string | null): AuctionPhase {
   if (status === "active") return "auction";
+  if (status === "paused") return "paused";
   if (status === "completed") return "completed";
   return "setup";
+}
+
+function buildSessionToken(payload: Omit<AuthSessionPayload, "iat" | "exp">) {
+  const issuedAtSeconds = Math.floor(Date.now() / 1000);
+  const expiresAtSeconds = issuedAtSeconds + SESSION_TTL_SECONDS;
+  const fullPayload: AuthSessionPayload = {
+    ...payload,
+    iat: issuedAtSeconds,
+    exp: expiresAtSeconds,
+  };
+
+  const payloadPart = Buffer.from(JSON.stringify(fullPayload)).toString("base64url");
+  const signaturePart = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(payloadPart)
+    .digest("base64url");
+
+  return `${payloadPart}.${signaturePart}`;
+}
+
+function shouldUseSecureCookie(req: Request) {
+  const forwardedProto = String((req.headers as any)?.["x-forwarded-proto"] ?? "").toLowerCase();
+  return req.secure || forwardedProto === "https";
+}
+
+function setSessionCookie(
+  req: Request,
+  res: any,
+  session: { role: "admin" | "captain" | "guest"; teamId?: number; teamName?: string },
+) {
+  const token = buildSessionToken(session);
+  res.cookie(SESSION_COOKIE_NAME, token, {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: shouldUseSecureCookie(req),
+    maxAge: SESSION_TTL_SECONDS,
+  });
+}
+
+function clearSessionCookie(req: Request, res: any) {
+  res.cookie(SESSION_COOKIE_NAME, "", {
+    httpOnly: true,
+    sameSite: "Lax",
+    secure: shouldUseSecureCookie(req),
+    maxAge: 0,
+  });
+}
+
+function getSessionFromRequest(req: Request): AuthSessionPayload | null {
+  const token = (req as any).cookies?.[SESSION_COOKIE_NAME];
+  if (!token || typeof token !== "string") return null;
+
+  const [payloadPart, signaturePart] = token.split(".");
+  if (!payloadPart || !signaturePart) return null;
+
+  const expectedSignature = crypto
+    .createHmac("sha256", SESSION_SECRET)
+    .update(payloadPart)
+    .digest("base64url");
+
+  const signatureBuffer = Buffer.from(signaturePart);
+  const expectedSignatureBuffer = Buffer.from(expectedSignature);
+  if (signatureBuffer.length !== expectedSignatureBuffer.length) return null;
+  if (!crypto.timingSafeEqual(signatureBuffer, expectedSignatureBuffer)) return null;
+
+  try {
+    const parsedPayload = JSON.parse(Buffer.from(payloadPart, "base64url").toString("utf8")) as AuthSessionPayload;
+    if (typeof parsedPayload.exp !== "number" || parsedPayload.exp <= Math.floor(Date.now() / 1000)) {
+      return null;
+    }
+
+    if (!["admin", "captain", "guest"].includes(parsedPayload.role)) {
+      return null;
+    }
+
+    return parsedPayload;
+  } catch {
+    return null;
+  }
+}
+
+function parsePlayerIdList(rawValue: unknown) {
+  if (!Array.isArray(rawValue)) return [];
+
+  return [...new Set(
+    rawValue
+      .map((value) => Number(value))
+      .filter((value) => Number.isInteger(value) && value > 0),
+  )];
+}
+
+function mapStorageError(error: unknown, defaultMessage: string) {
+  const rawMessage = error instanceof Error ? error.message : "";
+  if (rawMessage.startsWith("VALIDATION:")) {
+    return { status: 400, message: rawMessage.replace(/^VALIDATION:/, "") };
+  }
+  if (rawMessage.startsWith("CONFLICT:")) {
+    return { status: 409, message: rawMessage.replace(/^CONFLICT:/, "") };
+  }
+  if (rawMessage.startsWith("UNAUTHORIZED:")) {
+    return { status: 403, message: rawMessage.replace(/^UNAUTHORIZED:/, "") };
+  }
+  return { status: 500, message: defaultMessage };
 }
 
 function toStatusMap(playerStatuses: Array<{ validatePlayerStatusId: number; description: string }>) {
@@ -109,6 +228,70 @@ async function getUiState() {
   };
 }
 
+async function getInstantUiState() {
+  const [setup, teamsRaw, playersRaw, playerStatuses, instantState, locks] = await Promise.all([
+    storage.getSetup(),
+    storage.getTeams(),
+    storage.getPlayers(),
+    storage.getPlayerStatusRules(),
+    storage.getInstantAuctionState(),
+    storage.getInstantLocks(),
+  ]);
+
+  const statusMap = toStatusMap(playerStatuses);
+  const players = playersRaw.map((player) => toUiPlayer(player, statusMap));
+  const defaultBudget = setup?.budgetPerTeam ?? 500;
+
+  const teams = teamsRaw.map((team) => {
+    const teamPlayers = players.filter((player) => player.teamId === team.id);
+    const spent = teamPlayers.reduce((sum, player) => sum + (player.soldPrice ?? 0), 0);
+    const budget = (team.remainingBudget ?? defaultBudget) + spent;
+
+    return {
+      ...team,
+      budget,
+      spent,
+      captainUsername: team.ownerName,
+      players: teamPlayers,
+    };
+  });
+
+  return {
+    mode: "instant" as const,
+    phase: toAuctionPhase(instantState?.status),
+    lockDurationSeconds: INSTANT_LOCK_DURATION_SECONDS,
+    locks,
+    teams,
+    players,
+    availablePlayers: players.filter((player) => player.teamId == null),
+    settings: {
+      maxPlayersPerTeam: setup?.maxPlayersPerTeam ?? 11,
+    },
+  };
+}
+
+async function getAuctionModeState() {
+  const [liveAuctionState, instantState] = await Promise.all([
+    storage.getAuctionState(),
+    storage.getInstantAuctionState(),
+  ]);
+
+  if (instantState && instantState.status === "active") {
+    return { mode: "instant" as AuctionMode, phase: "auction" as AuctionPhase };
+  }
+
+  const livePhase = toAuctionPhase(liveAuctionState?.status);
+  if (livePhase === "auction" || livePhase === "paused" || livePhase === "completed") {
+    return { mode: "live" as AuctionMode, phase: livePhase };
+  }
+
+  if (instantState && instantState.status === "completed") {
+    return { mode: "instant" as AuctionMode, phase: "completed" as AuctionPhase };
+  }
+
+  return { mode: "none" as AuctionMode, phase: "setup" as AuctionPhase };
+}
+
 let initialized = false;
 
 export async function registerRoutes(app: Express): Promise<Server> {
@@ -131,6 +314,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       // Check for guest access
       if (normalizedUsername === "guest" && password === "guest") {
         const session = { role: "guest" as const };
+        setSessionCookie(req, res, session);
         res.json(session);
         return;
       }
@@ -140,6 +324,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         const isValidAdmin = await storage.validatePassword(password);
         if (isValidAdmin) {
           const session = { role: "admin" as const };
+          setSessionCookie(req, res, session);
           res.json(session);
           return;
         }
@@ -154,6 +339,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             teamId: team.id,
             teamName: team.name,
           };
+          setSessionCookie(req, res, session);
           res.json(session);
           return;
         }
@@ -163,6 +349,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const isValidAdmin = await storage.validatePassword(password);
       if (isValidAdmin && !normalizedUsername) {
         const session = { role: "admin" as const };
+        setSessionCookie(req, res, session);
         res.json(session);
         return;
       }
@@ -175,13 +362,14 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.post("/api/auth/logout", (req, res) => {
+    clearSessionCookie(req, res);
     res.clearCookie("auth");
     res.json({ success: true });
   });
 
   app.get("/api/auth/check", (req, res) => {
-    const authCookie = req.cookies?.["auth"];
-    res.json({ authenticated: authCookie === "authenticated" });
+    const session = getSessionFromRequest(req);
+    res.json({ authenticated: !!session });
   });
 
   // Setup routes
@@ -628,6 +816,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/start", async (req, res) => {
     try {
+      const instantState = await storage.getInstantAuctionState();
+      if (instantState?.status === "active") {
+        return res.status(400).json({ message: "Stop Instant Auction before starting Live Auction" });
+      }
+
       await storage.startAuction();
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -636,8 +829,194 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
+  app.post("/api/instant-auction/start", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || session.role !== "admin") {
+        return res.status(401).json({ message: "Admin authentication required" });
+      }
+
+      const liveAuctionState = await storage.getAuctionState();
+      if (liveAuctionState?.status === "active" || liveAuctionState?.status === "paused") {
+        return res.status(400).json({ message: "Live Auction is active. Stop it before starting Instant Auction." });
+      }
+
+      await storage.startInstantAuction();
+      const instantUiState = await getInstantUiState();
+      res.json(instantUiState);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to start instant auction" });
+    }
+  });
+
+  app.post("/api/instant-auction/stop", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || session.role !== "admin") {
+        return res.status(401).json({ message: "Admin authentication required" });
+      }
+
+      await storage.stopInstantAuction();
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ message: "Failed to stop instant auction" });
+    }
+  });
+
+  app.get("/api/instant-auction/state", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || (session.role !== "admin" && session.role !== "captain")) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const instantUiState = await getInstantUiState();
+      res.json(instantUiState);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get instant auction state" });
+    }
+  });
+
+  app.post("/api/instant-auction/lock", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || session.role !== "captain" || !Number.isInteger(session.teamId)) {
+        return res.status(401).json({ message: "Captain authentication required" });
+      }
+
+      const instantState = await storage.getInstantAuctionState();
+      if (!instantState || instantState.status !== "active") {
+        return res.status(400).json({ message: "Instant Auction is not active" });
+      }
+
+      const playerIds = parsePlayerIdList(req.body?.playerIds);
+      const locks = await storage.lockInstantPlayers(Number(session.teamId), playerIds);
+      res.json({ locks });
+    } catch (error) {
+      const mappedError = mapStorageError(error, "Failed to lock players");
+      res.status(mappedError.status).json({ message: mappedError.message });
+    }
+  });
+
+  app.post("/api/instant-auction/unlock", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || session.role !== "captain" || !Number.isInteger(session.teamId)) {
+        return res.status(401).json({ message: "Captain authentication required" });
+      }
+
+      const instantState = await storage.getInstantAuctionState();
+      if (!instantState || instantState.status !== "active") {
+        return res.status(400).json({ message: "Instant Auction is not active" });
+      }
+
+      const playerIds = parsePlayerIdList(req.body?.playerIds);
+      await storage.releaseInstantLocks(Number(session.teamId), playerIds);
+      res.json({ success: true });
+    } catch (error) {
+      const mappedError = mapStorageError(error, "Failed to unlock players");
+      res.status(mappedError.status).json({ message: mappedError.message });
+    }
+  });
+
+  app.post("/api/instant-auction/book", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || session.role !== "captain" || !Number.isInteger(session.teamId)) {
+        return res.status(401).json({ message: "Captain authentication required" });
+      }
+
+      const instantState = await storage.getInstantAuctionState();
+      if (!instantState || instantState.status !== "active") {
+        return res.status(400).json({ message: "Instant Auction is not active" });
+      }
+
+      const playerIds = parsePlayerIdList(req.body?.playerIds);
+      const bookingResult = await storage.bookInstantPlayers(Number(session.teamId), playerIds);
+      const instantUiState = await getInstantUiState();
+      res.json({
+        ...bookingResult,
+        state: instantUiState,
+      });
+    } catch (error) {
+      const mappedError = mapStorageError(error, "Failed to book selected players");
+      res.status(mappedError.status).json({ message: mappedError.message });
+    }
+  });
+
+  app.post("/api/instant-auction/release-booked", async (req, res) => {
+    try {
+      const session = getSessionFromRequest(req);
+      if (!session || (session.role !== "admin" && session.role !== "captain")) {
+        return res.status(401).json({ message: "Authentication required" });
+      }
+
+      const instantState = await storage.getInstantAuctionState();
+      if (!instantState || instantState.status !== "active") {
+        return res.status(400).json({ message: "Instant Auction is not active" });
+      }
+
+      const playerIds = parsePlayerIdList(req.body?.playerIds);
+      const result = await storage.releaseInstantBookedPlayers(playerIds, {
+        role: session.role === "admin" ? "admin" : "captain",
+        teamId: session.teamId,
+      });
+      const instantUiState = await getInstantUiState();
+      res.json({
+        ...result,
+        state: instantUiState,
+      });
+    } catch (error) {
+      const mappedError = mapStorageError(error, "Failed to release booked players");
+      res.status(mappedError.status).json({ message: mappedError.message });
+    }
+  });
+
+  app.post("/api/auction/pause", async (req, res) => {
+    try {
+      const auctionState = await storage.getAuctionState();
+      if (!auctionState) {
+        return res.status(400).json({ message: "No auction state found" });
+      }
+
+      if (auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      await storage.pauseAuction();
+      const uiState = await getUiState();
+      res.json(uiState.auction);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to pause auction" });
+    }
+  });
+
+  app.post("/api/auction/resume", async (req, res) => {
+    try {
+      const auctionState = await storage.getAuctionState();
+      if (!auctionState) {
+        return res.status(400).json({ message: "No auction state found" });
+      }
+
+      if (auctionState.status !== "paused") {
+        return res.status(400).json({ message: "Auction is not paused" });
+      }
+
+      await storage.resumeAuction();
+      const uiState = await getUiState();
+      res.json(uiState.auction);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to resume auction" });
+    }
+  });
+
   app.post("/api/auction/next", async (req, res) => {
     try {
+      const auctionState = await storage.getAuctionState();
+      if (!auctionState || auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
       await storage.nextPlayer();
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -653,10 +1032,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Team ID and amount required" });
       }
 
-      const [setup, players] = await Promise.all([
+      const [auctionState, setup, players] = await Promise.all([
+        storage.getAuctionState(),
         storage.getSetup(),
         storage.getPlayers(),
       ]);
+
+      if (!auctionState || auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      if (!auctionState.currentPlayerId) {
+        return res.status(400).json({ message: "No current player" });
+      }
+
       const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
       const soldPlayersCount = players.filter((player) => player.soldTo === Number(teamId)).length;
       if (soldPlayersCount >= maxPlayersPerTeam) {
@@ -683,7 +1072,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         storage.getSetup(),
       ]);
 
-      if (!auctionState || !auctionState.currentPlayerId || !auctionState.currentBidTeamId || !auctionState.currentBid) {
+      if (!auctionState || auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      if (!auctionState.currentPlayerId || !auctionState.currentBidTeamId || !auctionState.currentBid) {
         return res.status(400).json({ message: "No active bid to sell" });
       }
 
@@ -749,6 +1142,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/unsold", async (req, res) => {
     try {
+      const auctionState = await storage.getAuctionState();
+      if (!auctionState || auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
       await storage.markPlayerUnsold();
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -759,6 +1157,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/skip", async (req, res) => {
     try {
+      const auctionState = await storage.getAuctionState();
+      if (!auctionState || auctionState.status !== "active") {
+        return res.status(400).json({ message: "Auction is not active" });
+      }
+
       await storage.markPlayerUnsold();
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -797,11 +1200,20 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Auction endpoint for login routing
-  app.get("/api/auction", async (req, res) => {
+  app.get("/api/auction-mode", async (_req, res) => {
     try {
-      const uiState = await getUiState();
-      res.json({ phase: uiState.auction.phase });
+      const modeState = await getAuctionModeState();
+      res.json(modeState);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to get auction mode" });
+    }
+  });
+
+  // Auction endpoint for login routing
+  app.get("/api/auction", async (_req, res) => {
+    try {
+      const modeState = await getAuctionModeState();
+      res.json(modeState);
     } catch (error) {
       res.status(500).json({ message: "Failed to get auction" });
     }

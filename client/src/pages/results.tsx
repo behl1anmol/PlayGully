@@ -213,7 +213,9 @@ export default function ResultsPage() {
         {/* Team cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
           {state.teams.map((team, i) => {
-            const remaining = team.budget - team.spent;
+            const teamBudget = team.budget ?? team.remainingBudget ?? 0;
+            const teamSpent = team.spent ?? 0;
+            const remaining = teamBudget - teamSpent;
             const totalSpent = team.players.reduce(
               (sum, p) => sum + (p.soldPrice || 0),
               0
@@ -242,7 +244,7 @@ export default function ResultsPage() {
                   {/* Budget summary */}
                   <div className="flex justify-between text-xs text-muted-foreground px-1">
                     <span>
-                      Spent: ₹{totalSpent} / ₹{team.budget}
+                      Spent: ₹{totalSpent} / ₹{teamBudget}
                     </span>
                     <span>Remaining: ₹{remaining}</span>
                   </div>

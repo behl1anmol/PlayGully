@@ -16,6 +16,9 @@ import {
   CheckCircle2,
   LogOut,
   Trophy,
+  PauseCircle,
+  PlayCircle,
+  RotateCcw,
 } from "lucide-react";
 import type { Player, Team, AuctionState } from "@shared/schema";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
@@ -97,6 +100,74 @@ export default function AuctionPage() {
         navigate("/results");
       }
     },
+    onError: (err: Error) => {
+      toast({
+        title: "Error",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const pauseMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/auction/pause");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/state"] });
+      toast({
+        title: "Auction paused",
+        description: "You can resume later or reset from this screen.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Pause failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const resumeMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/auction/resume");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/state"] });
+      toast({
+        title: "Auction resumed",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Resume failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const resetMutation = useMutation({
+    mutationFn: async () => {
+      await apiRequest("POST", "/api/auction/reset");
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/state"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
+      navigate("/admin");
+      toast({ title: "Auction reset" });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Reset failed",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
   });
 
   if (isLoading || !state) {
@@ -142,6 +213,7 @@ export default function AuctionPage() {
 
   const isAdmin = activeSession.role === "admin";
   const isCaptain = activeSession.role === "captain";
+  const isPaused = state.auction.phase === "paused";
   const myTeamId = activeSession.teamId;
   const myTeam = state.teams.find((t) => t.id === myTeamId);
   const currentPlayer = state.currentPlayer;
@@ -154,7 +226,7 @@ export default function AuctionPage() {
   const playersTotal = state.auction.playerOrder.length;
 
   const handleBid = () => {
-    if (!myTeamId) return;
+    if (!myTeamId || isPaused) return;
     const amount = parseInt(bidAmount);
     if (!amount || amount < 1) return;
     bidMutation.mutate({ teamId: myTeamId, amount });
@@ -192,6 +264,9 @@ export default function AuctionPage() {
               </div>
             </div>
             <div className="flex items-center gap-2">
+              <Badge variant={isPaused ? "secondary" : "outline"} className="text-xs">
+                {isPaused ? "Paused" : "Live"}
+              </Badge>
               <Badge variant="outline" className="text-xs">
                 Player {playersDone}/{playersTotal}
               </Badge>
@@ -216,6 +291,15 @@ export default function AuctionPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+        {isPaused && (
+          <div className="rounded-xl p-4 text-center bg-muted border border-border">
+            <h2 className="text-base font-semibold">Auction Paused</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Bidding is temporarily stopped. Admin can resume or reset when ready.
+            </p>
+          </div>
+        )}
+
         {/* Current Player On Block */}
         {currentPlayer && (
           <Card className="overflow-hidden" data-testid="card-current-player">
@@ -261,7 +345,7 @@ export default function AuctionPage() {
               </div>
 
               {/* Captain bidding controls */}
-              {isCaptain && myTeamId && state.auction.currentBidderId !== myTeamId && (
+              {isCaptain && myTeamId && !isPaused && state.auction.currentBidderId !== myTeamId && (
                 <div className="mt-5 space-y-3">
                   <div className="flex items-center gap-2">
                     <div className="relative flex-1">
@@ -317,7 +401,7 @@ export default function AuctionPage() {
               )}
 
               {/* Captain has highest bid message */}
-              {isCaptain && myTeamId && state.auction.currentBidderId === myTeamId && (
+              {isCaptain && myTeamId && !isPaused && state.auction.currentBidderId === myTeamId && (
                 <div className="mt-5 text-center">
                   <Badge className="bg-primary/10 text-primary border-primary/20">
                     <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
@@ -326,28 +410,72 @@ export default function AuctionPage() {
                 </div>
               )}
 
-              {/* Admin controls: Sell / Skip */}
+              {isCaptain && isPaused && (
+                <div className="mt-5 text-center">
+                  <Badge variant="secondary">
+                    Auction is paused by admin. Waiting to resume.
+                  </Badge>
+                </div>
+              )}
+
+              {/* Admin controls */}
               {isAdmin && (
-                <div className="mt-5 flex justify-center gap-3">
-                  <Button
-                    onClick={() => sellMutation.mutate()}
-                    disabled={
-                      !state.auction.currentBidderId || sellMutation.isPending
-                    }
-                    data-testid="button-sell"
-                  >
-                    <CheckCircle2 className="w-4 h-4 mr-1" />
-                    Sold!
-                  </Button>
-                  <Button
-                    variant="outline"
-                    onClick={() => skipMutation.mutate()}
-                    disabled={skipMutation.isPending}
-                    data-testid="button-skip"
-                  >
-                    <SkipForward className="w-4 h-4 mr-1" />
-                    Unsold / Skip
-                  </Button>
+                <div className="mt-5 space-y-3">
+                  <div className="flex flex-wrap justify-center gap-3">
+                    {isPaused ? (
+                      <Button
+                        onClick={() => resumeMutation.mutate()}
+                        disabled={resumeMutation.isPending || pauseMutation.isPending}
+                        data-testid="button-resume-auction"
+                      >
+                        <PlayCircle className="w-4 h-4 mr-1" />
+                        Resume Auction
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="outline"
+                        onClick={() => pauseMutation.mutate()}
+                        disabled={pauseMutation.isPending || resumeMutation.isPending}
+                        data-testid="button-pause-auction"
+                      >
+                        <PauseCircle className="w-4 h-4 mr-1" />
+                        Pause Auction
+                      </Button>
+                    )}
+                    <Button
+                      variant="destructive"
+                      onClick={() => resetMutation.mutate()}
+                      disabled={resetMutation.isPending}
+                      data-testid="button-reset-auction"
+                    >
+                      <RotateCcw className="w-4 h-4 mr-1" />
+                      Reset Auction
+                    </Button>
+                  </div>
+
+                  <div className="flex justify-center gap-3">
+                    <Button
+                      onClick={() => sellMutation.mutate()}
+                      disabled={
+                        isPaused ||
+                        !state.auction.currentBidderId ||
+                        sellMutation.isPending
+                      }
+                      data-testid="button-sell"
+                    >
+                      <CheckCircle2 className="w-4 h-4 mr-1" />
+                      Sold!
+                    </Button>
+                    <Button
+                      variant="outline"
+                      onClick={() => skipMutation.mutate()}
+                      disabled={isPaused || skipMutation.isPending}
+                      data-testid="button-skip"
+                    >
+                      <SkipForward className="w-4 h-4 mr-1" />
+                      Unsold / Skip
+                    </Button>
+                  </div>
                 </div>
               )}
             </CardContent>

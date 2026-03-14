@@ -30,22 +30,24 @@ export default function LoginPage() {
       login(session);
 
       if (session.role === "admin") {
-        // Check auction state to route admin correctly
+        navigate("/admin");
+      } else if (session.role === "captain") {
         try {
-          const stateRes = await fetch("/api/auction");
+          const stateRes = await fetch("/api/auction-mode");
           const auctionState = await stateRes.json();
-          if (auctionState.phase === "auction") {
+
+          if (auctionState.mode === "instant" && auctionState.phase === "auction") {
+            navigate("/instant-auction");
+          } else if (auctionState.mode === "live" && (auctionState.phase === "auction" || auctionState.phase === "paused")) {
             navigate("/auction");
           } else if (auctionState.phase === "completed") {
             navigate("/results");
           } else {
-            navigate("/admin");
+            navigate("/");
           }
         } catch {
-          navigate("/admin");
+          navigate("/");
         }
-      } else if (session.role === "captain") {
-        navigate("/auction");
       } else {
         navigate("/results");
       }

@@ -98,6 +98,11 @@ export default function SetupPage() {
     queryKey: ["/api/setup"],
   });
 
+  const { data: auctionMode } = useQuery<{ mode: "none" | "live" | "instant"; phase: "setup" | "auction" | "paused" | "completed" }>({
+    queryKey: ["/api/auction-mode"],
+    refetchInterval: 3000,
+  });
+
   const buildStatusConfigDraft = (statuses: PlayerStatus[]) => {
     const getStatus = (names: string[]) => {
       const targetNames = new Set(names.map((name) => name.trim().toLowerCase()));
@@ -398,6 +403,24 @@ export default function SetupPage() {
     onError: (err: Error) => {
       toast({
         title: "Cannot start auction",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
+  const startInstantAuctionMutation = useMutation({
+    mutationFn: async () => {
+      const res = await apiRequest("POST", "/api/instant-auction/start");
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/auction-mode"] });
+      navigate("/instant-auction");
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Cannot start instant auction",
         description: err.message,
         variant: "destructive",
       });
@@ -724,6 +747,8 @@ export default function SetupPage() {
     teams.length === 2 &&
     players.length >= 1 &&
     teams.every((t: any) => t.captainUsername);
+
+  const isInstantAuctionActive = auctionMode?.mode === "instant" && auctionMode?.phase === "auction";
 
   return (
     <div className="min-h-screen bg-background">
@@ -1406,16 +1431,54 @@ export default function SetupPage() {
 
         {/* Start Auction */}
         <div className="flex flex-col items-center gap-2 pt-2 pb-8">
-          <Button
-            size="lg"
-            onClick={() => startAuctionMutation.mutate()}
-            disabled={!canStart || startAuctionMutation.isPending}
-            data-testid="button-start-auction"
-            className="text-base px-8"
-          >
-            <Gavel className="w-5 h-5 mr-2" />
-            Start Auction
-          </Button>
+          {isInstantAuctionActive && (
+            <div className="w-full max-w-xl rounded-lg border border-border bg-muted/40 px-4 py-3 text-center">
+              <p className="text-sm font-medium">Instant Auction is currently active.</p>
+              <p className="text-xs text-muted-foreground mt-1">
+                Open the Instant Auction screen to stop it or continue managing locks/bookings.
+              </p>
+              <Button
+                size="sm"
+                variant="outline"
+                className="mt-3"
+                onClick={() => navigate("/instant-auction")}
+                data-testid="button-open-instant-auction"
+              >
+                Open Instant Auction
+              </Button>
+            </div>
+          )}
+
+          <div className="flex flex-wrap items-center justify-center gap-2">
+            <Button
+              size="lg"
+              onClick={() => startAuctionMutation.mutate()}
+              disabled={!canStart || startAuctionMutation.isPending || startInstantAuctionMutation.isPending || isInstantAuctionActive}
+              data-testid="button-start-auction"
+              className="text-base px-8"
+            >
+              <Gavel className="w-5 h-5 mr-2" />
+              Start Live Auction
+            </Button>
+            <Button
+              size="lg"
+              variant="outline"
+              onClick={() => {
+                if (isInstantAuctionActive) {
+                  navigate("/instant-auction");
+                  return;
+                }
+
+                startInstantAuctionMutation.mutate();
+              }}
+              disabled={!canStart || startInstantAuctionMutation.isPending || startAuctionMutation.isPending}
+              data-testid="button-start-instant-auction"
+              className="text-base px-8"
+            >
+              <Gavel className="w-5 h-5 mr-2" />
+              {isInstantAuctionActive ? "Open Instant Auction" : "Start Instant Auction"}
+            </Button>
+          </div>
           {!canStart && (
             <p className="text-sm text-muted-foreground text-center">
               {teams.length < 2 ? "Add 2 teams with captain credentials" : ""}

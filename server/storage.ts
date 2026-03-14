@@ -1,7 +1,7 @@
 import { drizzle } from "drizzle-orm/postgres-js";
 import postgres from "postgres";
 import * as schema from "@shared/schema";
-import { and, eq, isNull } from "drizzle-orm";
+import { and, eq, gt, inArray, isNull, lte } from "drizzle-orm";
 
 // Use raw postgres connection for better compatibility
 const client = postgres(process.env.DATABASE_URL || "", {
@@ -9,9 +9,14 @@ const client = postgres(process.env.DATABASE_URL || "", {
 });
 
 const db = drizzle(client, { schema });
+const INSTANT_LOCK_DURATION_SECONDS = 180;
 
 function normalizeStatusName(statusDescription: string) {
   return statusDescription.trim().toLowerCase();
+}
+
+function toExpiryDate() {
+  return new Date(Date.now() + INSTANT_LOCK_DURATION_SECONDS * 1000);
 }
 
 export const storage = {
@@ -344,6 +349,22 @@ export const storage = {
     return state[0] || null;
   },
 
+  async getInstantAuctionState() {
+    const state = await db.select().from(schema.instantAuctionState).limit(1);
+    return state[0] || null;
+  },
+
+  async cleanupExpiredInstantLocks() {
+    await db
+      .delete(schema.instantPlayerLocks)
+      .where(lte(schema.instantPlayerLocks.expiresAt, new Date()));
+  },
+
+  async getInstantLocks() {
+    await this.cleanupExpiredInstantLocks();
+    return await db.select().from(schema.instantPlayerLocks);
+  },
+
   async startAuction() {
     const players = await db.select().from(schema.players).orderBy(schema.players.id);
     const playerIds = players.map(p => p.id);
@@ -375,11 +396,379 @@ export const storage = {
     return inserted[0];
   },
 
+  async startInstantAuction() {
+    await this.cleanupExpiredInstantLocks();
+
+    const existing = await db.select().from(schema.instantAuctionState).limit(1);
+    if (existing.length > 0) {
+      const updated = await db
+        .update(schema.instantAuctionState)
+        .set({ status: "active", startedAt: new Date() })
+        .where(eq(schema.instantAuctionState.id, existing[0].id))
+        .returning();
+      return updated[0];
+    }
+
+    const inserted = await db
+      .insert(schema.instantAuctionState)
+      .values({ status: "active" })
+      .returning();
+    return inserted[0];
+  },
+
+  async stopInstantAuction() {
+    await db.update(schema.instantAuctionState).set({ status: "idle" });
+    await db.delete(schema.instantPlayerLocks);
+  },
+
+  async lockInstantPlayers(teamId: number, playerIds: number[]) {
+    const uniquePlayerIds = [...new Set(playerIds.map((playerId) => Number(playerId)).filter(Number.isInteger))];
+    if (uniquePlayerIds.length === 0) {
+      throw new Error("VALIDATION:At least one player must be selected");
+    }
+
+    const expiryDate = toExpiryDate();
+
+    return await db.transaction(async (tx) => {
+      await tx
+        .delete(schema.instantPlayerLocks)
+        .where(
+          and(
+            inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+            lte(schema.instantPlayerLocks.expiresAt, new Date()),
+          ),
+        );
+
+      const players = await tx
+        .select()
+        .from(schema.players)
+        .where(inArray(schema.players.id, uniquePlayerIds));
+
+      if (players.length !== uniquePlayerIds.length) {
+        throw new Error("VALIDATION:One or more selected players do not exist");
+      }
+
+      const unavailablePlayers = players.filter((player) => player.soldTo !== null);
+      if (unavailablePlayers.length > 0) {
+        throw new Error("CONFLICT:One or more selected players are already booked");
+      }
+
+      const activeLocks = await tx
+        .select()
+        .from(schema.instantPlayerLocks)
+        .where(
+          and(
+            inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+            gt(schema.instantPlayerLocks.expiresAt, new Date()),
+          ),
+        );
+
+      const conflictingLocks = activeLocks.filter((lock) => lock.teamId !== teamId);
+      if (conflictingLocks.length > 0) {
+        throw new Error("CONFLICT:One or more selected players are locked by another captain");
+      }
+
+      const activeLockByPlayerId = new Map(activeLocks.map((lock) => [lock.playerId, lock]));
+      const playerIdsToInsert = uniquePlayerIds.filter((playerId) => !activeLockByPlayerId.has(playerId));
+      const playerIdsToRefresh = uniquePlayerIds.filter((playerId) => activeLockByPlayerId.has(playerId));
+
+      if (playerIdsToRefresh.length > 0) {
+        await tx
+          .update(schema.instantPlayerLocks)
+          .set({ expiresAt: expiryDate })
+          .where(
+            and(
+              inArray(schema.instantPlayerLocks.playerId, playerIdsToRefresh),
+              eq(schema.instantPlayerLocks.teamId, teamId),
+            ),
+          );
+      }
+
+      if (playerIdsToInsert.length > 0) {
+        try {
+          await tx.insert(schema.instantPlayerLocks).values(
+            playerIdsToInsert.map((playerId) => ({
+              playerId,
+              teamId,
+              expiresAt: expiryDate,
+            })),
+          );
+        } catch {
+          throw new Error("CONFLICT:One or more selected players were just locked by another captain");
+        }
+      }
+
+      return await tx
+        .select()
+        .from(schema.instantPlayerLocks)
+        .where(
+          and(
+            inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+            eq(schema.instantPlayerLocks.teamId, teamId),
+          ),
+        );
+    });
+  },
+
+  async releaseInstantLocks(teamId: number, playerIds: number[]) {
+    const uniquePlayerIds = [...new Set(playerIds.map((playerId) => Number(playerId)).filter(Number.isInteger))];
+    if (uniquePlayerIds.length === 0) {
+      return;
+    }
+
+    await db.delete(schema.instantPlayerLocks).where(
+      and(
+        inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+        eq(schema.instantPlayerLocks.teamId, teamId),
+      ),
+    );
+  },
+
+  async bookInstantPlayers(teamId: number, playerIds: number[]) {
+    const uniquePlayerIds = [...new Set(playerIds.map((playerId) => Number(playerId)).filter(Number.isInteger))];
+    if (uniquePlayerIds.length === 0) {
+      throw new Error("VALIDATION:At least one player must be selected");
+    }
+
+    return await db.transaction(async (tx) => {
+      await tx
+        .delete(schema.instantPlayerLocks)
+        .where(
+          and(
+            inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+            lte(schema.instantPlayerLocks.expiresAt, new Date()),
+          ),
+        );
+
+      const locks = await tx
+        .select()
+        .from(schema.instantPlayerLocks)
+        .where(
+          and(
+            inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds),
+            eq(schema.instantPlayerLocks.teamId, teamId),
+            gt(schema.instantPlayerLocks.expiresAt, new Date()),
+          ),
+        );
+
+      if (locks.length !== uniquePlayerIds.length) {
+        throw new Error("CONFLICT:All selected players must be locked by you before booking");
+      }
+
+      const [setupConfig, allTeams, allPlayers, statusRules] = await Promise.all([
+        tx.select().from(schema.setup).limit(1),
+        tx.select().from(schema.teams),
+        tx.select().from(schema.players),
+        this.getPlayerStatusRules(),
+      ]);
+
+      const selectedPlayers = allPlayers.filter((player) => uniquePlayerIds.includes(player.id));
+      if (selectedPlayers.length !== uniquePlayerIds.length) {
+        throw new Error("VALIDATION:One or more selected players do not exist");
+      }
+
+      const alreadyBooked = selectedPlayers.find((player) => player.soldTo !== null);
+      if (alreadyBooked) {
+        throw new Error("CONFLICT:One or more selected players are already booked");
+      }
+
+      const selectedTeam = allTeams.find((team) => team.id === teamId);
+      if (!selectedTeam) {
+        throw new Error("VALIDATION:Team not found");
+      }
+
+      const maxPlayersPerTeam = setupConfig[0]?.maxPlayersPerTeam ?? 11;
+      const soldPlayersForTeam = allPlayers.filter((player) => player.soldTo === teamId);
+      if (soldPlayersForTeam.length + selectedPlayers.length > maxPlayersPerTeam) {
+        throw new Error(`CONFLICT:Rule violation: Team can have maximum ${maxPlayersPerTeam} players`);
+      }
+
+      const statusRuleByStatusId = new Map(
+        statusRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
+      );
+
+      const currentStatusCountByStatusId = new Map<number, number>();
+      for (const player of soldPlayersForTeam) {
+        if (!Number.isInteger(player.validatePlayerStatusId ?? null)) continue;
+        const statusId = Number(player.validatePlayerStatusId);
+        currentStatusCountByStatusId.set(statusId, (currentStatusCountByStatusId.get(statusId) ?? 0) + 1);
+      }
+
+      const eliteStatusRule = statusRules.find(
+        (statusRule) => normalizeStatusName(statusRule.description) === "elite",
+      );
+      if (eliteStatusRule) {
+        const captainAlreadyCounted = soldPlayersForTeam.some(
+          (player) =>
+            player.validatePlayerStatusId === eliteStatusRule.validatePlayerStatusId &&
+            player.name.toLowerCase() === selectedTeam.ownerName.toLowerCase(),
+        );
+        if (!captainAlreadyCounted) {
+          currentStatusCountByStatusId.set(
+            eliteStatusRule.validatePlayerStatusId,
+            (currentStatusCountByStatusId.get(eliteStatusRule.validatePlayerStatusId) ?? 0) + 1,
+          );
+        }
+      }
+
+      const selectedStatusCountByStatusId = new Map<number, number>();
+      for (const player of selectedPlayers) {
+        if (!Number.isInteger(player.validatePlayerStatusId ?? null)) continue;
+        const statusId = Number(player.validatePlayerStatusId);
+        selectedStatusCountByStatusId.set(statusId, (selectedStatusCountByStatusId.get(statusId) ?? 0) + 1);
+      }
+
+      for (const [statusId, selectedCount] of selectedStatusCountByStatusId.entries()) {
+        const statusRule = statusRuleByStatusId.get(statusId);
+        if (!statusRule || statusRule.maxPerTeam === null) continue;
+
+        const currentCount = currentStatusCountByStatusId.get(statusId) ?? 0;
+        if (currentCount + selectedCount > statusRule.maxPerTeam) {
+          throw new Error(
+            `CONFLICT:Rule violation: Team already has maximum allowed ${statusRule.description} players (${statusRule.maxPerTeam})`,
+          );
+        }
+      }
+
+      const totalPrice = selectedPlayers.reduce((sum, player) => sum + (player.basePrice ?? 0), 0);
+      if (selectedTeam.remainingBudget < totalPrice) {
+        throw new Error("CONFLICT:Insufficient budget to complete booking");
+      }
+
+      for (const player of selectedPlayers) {
+        const updatedPlayers = await tx
+          .update(schema.players)
+          .set({
+            soldTo: teamId,
+            soldAmount: player.basePrice,
+            status: "sold",
+          })
+          .where(
+            and(
+              eq(schema.players.id, player.id),
+              isNull(schema.players.soldTo),
+            ),
+          )
+          .returning();
+
+        if (updatedPlayers.length === 0) {
+          throw new Error("CONFLICT:A selected player became unavailable during booking");
+        }
+      }
+
+      await tx
+        .update(schema.teams)
+        .set({ remainingBudget: selectedTeam.remainingBudget - totalPrice })
+        .where(eq(schema.teams.id, teamId));
+
+      await tx
+        .delete(schema.instantPlayerLocks)
+        .where(inArray(schema.instantPlayerLocks.playerId, uniquePlayerIds));
+
+      return {
+        bookedPlayerIds: uniquePlayerIds,
+        totalPrice,
+      };
+    });
+  },
+
+  async releaseInstantBookedPlayers(
+    playerIds: number[],
+    actor: { role: "admin" | "captain"; teamId?: number },
+  ) {
+    const uniquePlayerIds = [...new Set(playerIds.map((playerId) => Number(playerId)).filter(Number.isInteger))];
+    if (uniquePlayerIds.length === 0) {
+      throw new Error("VALIDATION:At least one player must be selected");
+    }
+
+    return await db.transaction(async (tx) => {
+      const players = await tx
+        .select()
+        .from(schema.players)
+        .where(inArray(schema.players.id, uniquePlayerIds));
+
+      if (players.length !== uniquePlayerIds.length) {
+        throw new Error("VALIDATION:One or more selected players do not exist");
+      }
+
+      const unsoldPlayer = players.find((player) => player.soldTo === null);
+      if (unsoldPlayer) {
+        throw new Error("VALIDATION:Only booked players can be released");
+      }
+
+      if (actor.role === "captain") {
+        if (!Number.isInteger(actor.teamId)) {
+          throw new Error("UNAUTHORIZED:Captain team is missing");
+        }
+
+        const hasOtherTeamPlayer = players.some((player) => player.soldTo !== actor.teamId);
+        if (hasOtherTeamPlayer) {
+          throw new Error("UNAUTHORIZED:You can only release players booked by your team");
+        }
+      }
+
+      const refundByTeamId = new Map<number, number>();
+      for (const player of players) {
+        const teamId = Number(player.soldTo);
+        if (!Number.isInteger(teamId)) continue;
+        refundByTeamId.set(teamId, (refundByTeamId.get(teamId) ?? 0) + (player.soldAmount ?? 0));
+      }
+
+      const teams = await tx.select().from(schema.teams).where(inArray(schema.teams.id, [...refundByTeamId.keys()]));
+      for (const team of teams) {
+        const refund = refundByTeamId.get(team.id) ?? 0;
+        await tx
+          .update(schema.teams)
+          .set({ remainingBudget: team.remainingBudget + refund })
+          .where(eq(schema.teams.id, team.id));
+      }
+
+      await tx
+        .update(schema.players)
+        .set({ soldTo: null, soldAmount: null, status: "available" })
+        .where(inArray(schema.players.id, uniquePlayerIds));
+
+      return {
+        releasedPlayerIds: uniquePlayerIds,
+      };
+    });
+  },
+
+  async pauseAuction() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state found');
+
+    const current = state[0];
+    if (current.status !== 'active') throw new Error('Auction is not active');
+
+    const updated = await db.update(schema.auctionState)
+      .set({ status: 'paused' })
+      .where(eq(schema.auctionState.id, current.id))
+      .returning();
+    return updated[0];
+  },
+
+  async resumeAuction() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state found');
+
+    const current = state[0];
+    if (current.status !== 'paused') throw new Error('Auction is not paused');
+
+    const updated = await db.update(schema.auctionState)
+      .set({ status: 'active' })
+      .where(eq(schema.auctionState.id, current.id))
+      .returning();
+    return updated[0];
+  },
+
   async nextPlayer() {
     const state = await db.select().from(schema.auctionState).limit(1);
     if (!state.length) throw new Error('No auction state found');
     
     const current = state[0];
+    if (current.status !== 'active') throw new Error('Auction is not active');
+
     const nextIndex = current.currentPlayerIndex + 1;
     const nextPlayerId = current.playerQueue[nextIndex] || null;
     
@@ -399,6 +788,9 @@ export const storage = {
   async placeBid(teamId: number, amount: number) {
     const state = await db.select().from(schema.auctionState).limit(1);
     if (!state.length) throw new Error('No auction state');
+
+    if (state[0].status !== 'active') throw new Error('Auction is not active');
+    if (!state[0].currentPlayerId) throw new Error('No current player');
     
     const updated = await db.update(schema.auctionState)
       .set({ currentBid: amount, currentBidTeamId: teamId })
@@ -412,6 +804,8 @@ export const storage = {
     if (!state.length) throw new Error('No auction state');
     
     const current = state[0];
+    if (current.status !== 'active') throw new Error('Auction is not active');
+
     if (!current.currentPlayerId || !current.currentBidTeamId || !current.currentBid) {
       throw new Error('No active bid to sell');
     }
@@ -442,6 +836,8 @@ export const storage = {
     if (!state.length) throw new Error('No auction state');
     
     const current = state[0];
+    if (current.status !== 'active') throw new Error('Auction is not active');
+
     if (!current.currentPlayerId) throw new Error('No current player');
 
     await db.update(schema.players)
@@ -452,6 +848,25 @@ export const storage = {
   },
 
   async resetAuction() {
+    await db.delete(schema.instantPlayerLocks);
+    await db.update(schema.instantAuctionState).set({ status: "idle" });
+
+    const [teams, players] = await Promise.all([
+      db.select().from(schema.teams),
+      db.select().from(schema.players),
+    ]);
+
+    for (const team of teams) {
+      const totalSpentByTeam = players
+        .filter((player) => player.soldTo === team.id)
+        .reduce((total, player) => total + (player.soldAmount ?? 0), 0);
+
+      await db
+        .update(schema.teams)
+        .set({ remainingBudget: team.remainingBudget + totalSpentByTeam })
+        .where(eq(schema.teams.id, team.id));
+    }
+
     await db.update(schema.players).set({ status: 'available', soldTo: null, soldAmount: null });
     await db.delete(schema.auctionState);
   },

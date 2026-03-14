@@ -9,6 +9,7 @@ import NotFound from "@/pages/not-found";
 import LoginPage from "@/pages/login";
 import SetupPage from "@/pages/setup";
 import AuctionPage from "@/pages/auction";
+import InstantAuctionPage from "@/pages/instant-auction";
 import ResultsPage from "@/pages/results";
 
 function AppRouter() {
@@ -17,6 +18,7 @@ function AppRouter() {
       <Route path="/" component={LoginPage} />
       <Route path="/admin" component={SetupPage} />
       <Route path="/auction" component={AuctionPage} />
+      <Route path="/instant-auction" component={InstantAuctionPage} />
       <Route path="/results" component={ResultsPage} />
       <Route component={NotFound} />
     </Switch>

@@ -1,4 +1,4 @@
-import { pgTable, serial, text, integer, boolean, jsonb } from "drizzle-orm/pg-core";
+import { pgTable, serial, text, integer, boolean, jsonb, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 
 export type AuthSession = {
@@ -50,12 +50,31 @@ export const teams = pgTable("teams", {
 
 export const auctionState = pgTable("auction_state", {
   id: serial("id").primaryKey(),
-  status: text("status").notNull().default("idle"), // idle, active, completed
+  status: text("status").notNull().default("idle"), // idle, active, paused, completed
   currentPlayerIndex: integer("current_player_index").notNull().default(0),
   currentPlayerId: integer("current_player_id"),
   playerQueue: jsonb("player_queue").notNull().$type<number[]>().default([]),
   currentBid: integer("current_bid"),
   currentBidTeamId: integer("current_bid_team_id"),
+});
+
+export const instantAuctionState = pgTable("instant_auction_state", {
+  id: serial("id").primaryKey(),
+  status: text("status").notNull().default("idle"), // idle, active, completed
+  startedAt: timestamp("started_at", { withTimezone: true }).defaultNow(),
+});
+
+export const instantPlayerLocks = pgTable("instant_player_locks", {
+  id: serial("id").primaryKey(),
+  playerId: integer("player_id")
+    .notNull()
+    .references(() => players.id)
+    .unique(),
+  teamId: integer("team_id")
+    .notNull()
+    .references(() => teams.id),
+  expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 });
 
 export const insertPlayerSchema = createInsertSchema(players).omit({ id: true, status: true, soldTo: true, soldAmount: true });
@@ -73,9 +92,11 @@ export type Team = typeof teams.$inferSelect & {
   captainUsername?: string;
 };
 export type AuctionState = {
-  phase: "setup" | "auction" | "completed";
+  phase: "setup" | "auction" | "paused" | "completed";
   currentPlayerIndex: number;
   currentBid: number;
   currentBidderId: number | null;
   playerOrder: number[];
 };
+
+export type InstantPlayerLock = typeof instantPlayerLocks.$inferSelect;

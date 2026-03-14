@@ -2,6 +2,15 @@ import { QueryClient, QueryFunction } from "@tanstack/react-query";
 
 const API_BASE = "__PORT_5000__".startsWith("__") ? "" : "__PORT_5000__";
 
+function isVolatileQueryPath(path: string) {
+  return (
+    path === "/api/state" ||
+    path === "/api/auction-mode" ||
+    path.startsWith("/api/auction") ||
+    path.startsWith("/api/instant-auction")
+  );
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
     const text = (await res.text()) || res.statusText;
@@ -30,7 +39,22 @@ export const getQueryFn: <T>(options: {
 }) => QueryFunction<T> =
   ({ on401: unauthorizedBehavior }) =>
   async ({ queryKey }) => {
-    const res = await fetch(`${API_BASE}${queryKey.join("/")}`);
+    const queryPath = queryKey.join("/");
+    const requestUrl = `${API_BASE}${queryPath}`;
+    const volatileRequest = isVolatileQueryPath(queryPath);
+
+    const res = await fetch(
+      requestUrl,
+      volatileRequest
+        ? {
+            cache: "no-store",
+            headers: {
+              "Cache-Control": "no-cache",
+              Pragma: "no-cache",
+            },
+          }
+        : undefined,
+    );
 
     if (unauthorizedBehavior === "returnNull" && res.status === 401) {
       return null;

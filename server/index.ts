@@ -17,6 +17,7 @@ function cookieParser(req: any, res: any, next: any) {
   const originalCookie = res.cookie;
   res.cookie = function(name: string, value: string, options: any = {}) {
     let setCookieValue = `${name}=${encodeURIComponent(value)}`;
+    setCookieValue += `; Path=${options.path || '/'}`;
     if (options.maxAge) {
       setCookieValue += `; Max-Age=${options.maxAge}`;
     }
@@ -40,6 +41,24 @@ const app = express();
 app.use(express.json());
 app.use(express.urlencoded({ extended: false }));
 app.use(cookieParser);
+
+function isVolatileApiPath(path: string) {
+  return (
+    path === "/api/state" ||
+    path === "/api/auction-mode" ||
+    path.startsWith("/api/auction") ||
+    path.startsWith("/api/instant-auction")
+  );
+}
+
+app.use((req, res, next) => {
+  if (isVolatileApiPath(req.path)) {
+    res.setHeader("Cache-Control", "no-store, no-cache, must-revalidate, proxy-revalidate");
+    res.setHeader("Pragma", "no-cache");
+    res.setHeader("Expires", "0");
+  }
+  next();
+});
 
 app.use((req, res, next) => {
   const start = Date.now();
