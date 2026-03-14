@@ -1,31 +1,23 @@
 import { build } from "esbuild";
 import { execSync } from "child_process";
 import path from "path";
+import { fileURLToPath } from "url";
 
-const isWatch = process.argv.includes("--watch");
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
-// Build the client with Vite
 console.log("Building client...");
 execSync("npx vite build", { stdio: "inherit" });
-console.log("Client built successfully");
 
-// Build the server
 console.log("Building server...");
 await build({
-  entryPoints: [path.resolve(import.meta.dirname, "../server/index.ts")],
+  entryPoints: [path.resolve(__dirname, "../server/index.ts")],
   bundle: true,
   platform: "node",
   target: "node20",
-  format: "cjs",
-  outfile: "dist/index.cjs",
-  packages: "bundle",
-  sourcemap: true,
-  minify: false,
-  banner: {
-    js: '"use strict";',
-  },
-  define: {
-    "import.meta.dirname": "__dirname",
-  },
+  outfile: path.resolve(__dirname, "../dist/index.js"),
+  external: ["@neondatabase/serverless"],
+  format: "esm",
 });
-console.log("Server built successfully");
+
+console.log("Build complete!");

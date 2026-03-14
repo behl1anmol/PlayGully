@@ -1,213 +1,204 @@
-import { randomUUID } from "crypto";
+import { drizzle } from "drizzle-orm/neon-serverless";
+import { neon } from "@neondatabase/serverless";
+import * as schema from "@shared/schema";
+import { eq } from "drizzle-orm";
 
-export interface Player {
-  id: string;
-  name: string;
-  basePrice: number;
-  teamId: string | null;
-  soldPrice: number | null;
-}
+const sql = neon(process.env.DATABASE_URL!);
+const db = drizzle(sql, { schema });
 
-export interface Team {
-  id: string;
-  name: string;
-  color: string;
-  budget: number;
-  spent: number;
-  captainUsername: string | null;
-  captainPassword: string | null;
-}
+export const storage = {
+  // Password validation
+  async validatePassword(password: string): Promise<boolean> {
+    const setup = await db.select().from(schema.setup).limit(1);
+    if (!setup.length) return false;
+    return setup[0].password === password;
+  },
 
-export interface AuctionState {
-  phase: "setup" | "auction" | "completed";
-  currentPlayerIndex: number;
-  playerOrder: string[];
-  currentBid: number;
-  currentBidderId: string | null;
-  biddingOpen: boolean;
-}
+  // Setup
+  async getSetup() {
+    const result = await db.select().from(schema.setup).limit(1);
+    return result[0] || null;
+  },
 
-interface Session {
-  role: "admin" | "captain" | "guest";
-  teamId?: string;
-  username: string;
-}
-
-const ADMIN_USER = "admin";
-const ADMIN_PASS = "appl2026";
-const GUEST_USER = "guest";
-const GUEST_PASS = "guest";
-
-class MemStorage {
-  private players: Map<string, Player> = new Map();
-  private teams: Map<string, Team> = new Map();
-  private auctionState: AuctionState = {
-    phase: "setup",
-    currentPlayerIndex: 0,
-    playerOrder: [],
-    currentBid: 0,
-    currentBidderId: null,
-    biddingOpen: false,
-  };
-
-  // ── Auth ──
-  async authenticate(username: string, password: string): Promise<Session | null> {
-    if (username === ADMIN_USER && password === ADMIN_PASS) {
-      return { role: "admin", username };
+  async saveSetup(data: { teamCount: number; budgetPerTeam: number; password?: string }) {
+    const existing = await db.select().from(schema.setup).limit(1);
+    if (existing.length > 0) {
+      const updated = await db.update(schema.setup)
+        .set({ teamCount: data.teamCount, budgetPerTeam: data.budgetPerTeam, ...(data.password ? { password: data.password } : {}) })
+        .where(eq(schema.setup.id, existing[0].id))
+        .returning();
+      return updated[0];
     }
-    if (username === GUEST_USER && password === GUEST_PASS) {
-      return { role: "guest", username };
+    const inserted = await db.insert(schema.setup).values(data).returning();
+    return inserted[0];
+  },
+
+  // Players
+  async getPlayers() {
+    return await db.select().from(schema.players).orderBy(schema.players.id);
+  },
+
+  async createPlayer(data: typeof schema.insertPlayerSchema._type) {
+    const inserted = await db.insert(schema.players).values(data).returning();
+    return inserted[0];
+  },
+
+  async updatePlayer(id: number, updates: Partial<typeof schema.players.$inferInsert>) {
+    const updated = await db.update(schema.players)
+      .set(updates)
+      .where(eq(schema.players.id, id))
+      .returning();
+    return updated[0] || null;
+  },
+
+  async deletePlayer(id: number) {
+    await db.delete(schema.players).where(eq(schema.players.id, id));
+  },
+
+  // Teams
+  async getTeams() {
+    return await db.select().from(schema.teams).orderBy(schema.teams.id);
+  },
+
+  async createTeam(data: typeof schema.insertTeamSchema._type) {
+    const inserted = await db.insert(schema.teams).values(data).returning();
+    return inserted[0];
+  },
+
+  async updateTeam(id: number, updates: Partial<typeof schema.teams.$inferInsert>) {
+    const updated = await db.update(schema.teams)
+      .set(updates)
+      .where(eq(schema.teams.id, id))
+      .returning();
+    return updated[0] || null;
+  },
+
+  // Auction
+  async getAuctionState() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    return state[0] || null;
+  },
+
+  async startAuction() {
+    const players = await db.select().from(schema.players).orderBy(schema.players.id);
+    const playerIds = players.map(p => p.id);
+    
+    const existing = await db.select().from(schema.auctionState).limit(1);
+    if (existing.length > 0) {
+      const updated = await db.update(schema.auctionState)
+        .set({ 
+          status: 'active',
+          currentPlayerIndex: 0,
+          currentPlayerId: playerIds[0] || null,
+          playerQueue: playerIds,
+          currentBid: null,
+          currentBidTeamId: null
+        })
+        .where(eq(schema.auctionState.id, existing[0].id))
+        .returning();
+      return updated[0];
     }
-    // Check captain credentials
-    for (const team of this.teams.values()) {
-      if (
-        team.captainUsername === username &&
-        team.captainPassword === password
-      ) {
-        return { role: "captain", teamId: team.id, username };
-      }
-    }
-    return null;
-  }
-
-  // ── Players ──
-  async getPlayers(): Promise<Player[]> {
-    return Array.from(this.players.values());
-  }
-
-  async getAvailablePlayers(): Promise<Player[]> {
-    return Array.from(this.players.values()).filter((p) => !p.teamId);
-  }
-
-  async getPlayer(id: string): Promise<Player | undefined> {
-    return this.players.get(id);
-  }
-
-  async addPlayer(data: { name: string; basePrice: number }): Promise<Player> {
-    const player: Player = {
-      id: randomUUID(),
-      name: data.name,
-      basePrice: data.basePrice,
-      teamId: null,
-      soldPrice: null,
-    };
-    this.players.set(player.id, player);
-    return player;
-  }
-
-  async removePlayer(id: string): Promise<void> {
-    this.players.delete(id);
-  }
-
-  async clearPlayers(): Promise<void> {
-    this.players.clear();
-  }
-
-  async sellPlayer(
-    playerId: string,
-    teamId: string,
-    price: number
-  ): Promise<Player> {
-    const player = this.players.get(playerId);
-    if (!player) throw new Error("Player not found");
-    const team = this.teams.get(teamId);
-    if (!team) throw new Error("Team not found");
-    player.teamId = teamId;
-    player.soldPrice = price;
-    team.spent += price;
-    this.players.set(playerId, player);
-    this.teams.set(teamId, team);
-    return player;
-  }
-
-  // ── Teams ──
-  async getTeams(): Promise<Team[]> {
-    return Array.from(this.teams.values());
-  }
-
-  async getTeam(id: string): Promise<Team | undefined> {
-    return this.teams.get(id);
-  }
-
-  async getTeamPlayers(teamId: string): Promise<Player[]> {
-    return Array.from(this.players.values()).filter(
-      (p) => p.teamId === teamId
-    );
-  }
-
-  async addTeam(data: {
-    name: string;
-    color: string;
-    budget: number;
-    captainUsername?: string | null;
-    captainPassword?: string | null;
-  }): Promise<Team> {
-    const team: Team = {
-      id: randomUUID(),
-      name: data.name,
-      color: data.color,
-      budget: data.budget,
-      spent: 0,
-      captainUsername: data.captainUsername ?? null,
-      captainPassword: data.captainPassword ?? null,
-    };
-    this.teams.set(team.id, team);
-    return team;
-  }
-
-  async updateTeam(
-    id: string,
-    data: Partial<Omit<Team, "id">>
-  ): Promise<Team> {
-    const team = this.teams.get(id);
-    if (!team) throw new Error("Team not found");
-    Object.assign(team, data);
-    this.teams.set(id, team);
-    return team;
-  }
-
-  async removeTeam(id: string): Promise<void> {
-    this.teams.delete(id);
-  }
-
-  async clearTeams(): Promise<void> {
-    this.teams.clear();
-  }
-
-  // ── Auction State ──
-  async getAuctionState(): Promise<AuctionState> {
-    return { ...this.auctionState };
-  }
-
-  async updateAuctionState(
-    updates: Partial<AuctionState>
-  ): Promise<AuctionState> {
-    Object.assign(this.auctionState, updates);
-    return { ...this.auctionState };
-  }
-
-  async resetAuction(): Promise<void> {
-    // Reset all players
-    for (const [id, player] of this.players.entries()) {
-      player.teamId = null;
-      player.soldPrice = null;
-      this.players.set(id, player);
-    }
-    // Reset team budgets
-    for (const [id, team] of this.teams.entries()) {
-      team.spent = 0;
-      this.teams.set(id, team);
-    }
-    // Reset auction state
-    this.auctionState = {
-      phase: "setup",
+    
+    const inserted = await db.insert(schema.auctionState).values({
+      status: 'active',
       currentPlayerIndex: 0,
-      playerOrder: [],
-      currentBid: 0,
-      currentBidderId: null,
-      biddingOpen: false,
-    };
-  }
-}
+      currentPlayerId: playerIds[0] || null,
+      playerQueue: playerIds,
+      currentBid: null,
+      currentBidTeamId: null
+    }).returning();
+    return inserted[0];
+  },
 
-export const storage = new MemStorage();
+  async nextPlayer() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state found');
+    
+    const current = state[0];
+    const nextIndex = current.currentPlayerIndex + 1;
+    const nextPlayerId = current.playerQueue[nextIndex] || null;
+    
+    const updated = await db.update(schema.auctionState)
+      .set({
+        currentPlayerIndex: nextIndex,
+        currentPlayerId: nextPlayerId,
+        currentBid: null,
+        currentBidTeamId: null,
+        status: nextPlayerId ? 'active' : 'completed'
+      })
+      .where(eq(schema.auctionState.id, current.id))
+      .returning();
+    return updated[0];
+  },
+
+  async placeBid(teamId: number, amount: number) {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state');
+    
+    const updated = await db.update(schema.auctionState)
+      .set({ currentBid: amount, currentBidTeamId: teamId })
+      .where(eq(schema.auctionState.id, state[0].id))
+      .returning();
+    return updated[0];
+  },
+
+  async sellPlayer() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state');
+    
+    const current = state[0];
+    if (!current.currentPlayerId || !current.currentBidTeamId || !current.currentBid) {
+      throw new Error('No active bid to sell');
+    }
+
+    // Update player as sold
+    await db.update(schema.players)
+      .set({ 
+        soldTo: current.currentBidTeamId,
+        soldAmount: current.currentBid,
+        status: 'sold'
+      })
+      .where(eq(schema.players.id, current.currentPlayerId));
+
+    // Update team budget
+    const team = await db.select().from(schema.teams).where(eq(schema.teams.id, current.currentBidTeamId)).limit(1);
+    if (team.length > 0) {
+      await db.update(schema.teams)
+        .set({ remainingBudget: team[0].remainingBudget - current.currentBid })
+        .where(eq(schema.teams.id, current.currentBidTeamId));
+    }
+
+    // Move to next player
+    return await this.nextPlayer();
+  },
+
+  async markPlayerUnsold() {
+    const state = await db.select().from(schema.auctionState).limit(1);
+    if (!state.length) throw new Error('No auction state');
+    
+    const current = state[0];
+    if (!current.currentPlayerId) throw new Error('No current player');
+
+    await db.update(schema.players)
+      .set({ status: 'unsold' })
+      .where(eq(schema.players.id, current.currentPlayerId));
+
+    return await this.nextPlayer();
+  },
+
+  async resetAuction() {
+    await db.update(schema.players).set({ status: 'available', soldTo: null, soldAmount: null });
+    await db.delete(schema.auctionState);
+  },
+
+  // Results
+  async getResults() {
+    const teams = await db.select().from(schema.teams);
+    const players = await db.select().from(schema.players);
+    
+    return teams.map(team => ({
+      ...team,
+      players: players.filter(p => p.soldTo === team.id)
+    }));
+  }
+};

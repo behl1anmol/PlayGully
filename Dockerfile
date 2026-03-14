@@ -1,31 +1,17 @@
-# ── Stage 1: Build ──
-FROM node:20-alpine AS builder
+FROM node:20-slim
 
 WORKDIR /app
 
-# Install dependencies first (better layer caching)
-COPY package.json package-lock.json* ./
-RUN npm ci
+COPY package*.json ./
+RUN npm install --production
 
-# Copy source and build
-COPY . .
-RUN npm run build
-
-# ── Stage 2: Production ──
-FROM node:20-alpine AS runner
-
-WORKDIR /app
+COPY server/ ./server/
+COPY shared/ ./shared/
+COPY server/public/ ./server/public/
 
 ENV NODE_ENV=production
-ENV PORT=5000
+ENV PORT=3000
 
-# Only copy the build output — no source code, no devDependencies
-COPY --from=builder /app/dist ./dist
+EXPOSE 3000
 
-EXPOSE 5000
-
-# Health check for cloud platforms
-HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-  CMD wget -qO- http://localhost:5000/api/auction || exit 1
-
-CMD ["node", "dist/index.cjs"]
+CMD ["node", "dist/index.js"]
