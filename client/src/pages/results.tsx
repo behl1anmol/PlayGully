@@ -51,11 +51,26 @@ export default function ResultsPage() {
   }
 
   const isAdmin = activeSession.role === "admin";
+  const isGuest = activeSession.role === "guest";
   const isCompleted = state.auction.phase === "completed";
   const isAuctionLive = state.auction.phase === "auction";
   const unsoldPlayers = state.players.filter(
     (p) => !p.teamId && state.auction.phase === "completed"
   );
+  const captainNameSet = new Set(
+    state.teams
+      .map((team) => (team.captainUsername ?? "").trim().toLowerCase())
+      .filter((value) => value.length > 0),
+  );
+  const guestPoolPlayers = state.availablePlayers
+    .filter((player) => {
+      const playerName = player.name.trim().toLowerCase();
+      const isCaptainByName = captainNameSet.has(playerName);
+      const isCaptainByEliteStatus =
+        (player.playerStatusDescription ?? "").trim().toLowerCase() === "elite";
+      return !isCaptainByName && !isCaptainByEliteStatus;
+    })
+    .sort((firstPlayer, secondPlayer) => firstPlayer.name.localeCompare(secondPlayer.name));
 
   return (
     <div className="min-h-screen bg-background">
@@ -149,6 +164,50 @@ export default function ResultsPage() {
               The admin hasn't started the auction yet.
             </p>
           </div>
+        )}
+
+        {/* Guest pool view */}
+        {isGuest && (
+          <Card data-testid="card-guest-player-pool">
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-semibold flex items-center gap-2">
+                <Gavel className="w-4 h-4 text-primary" />
+                Player Pool (Non-Captains)
+                <Badge variant="secondary" className="ml-auto font-normal">
+                  {guestPoolPlayers.length} players
+                </Badge>
+              </CardTitle>
+            </CardHeader>
+            <CardContent>
+              {guestPoolPlayers.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-2">
+                  No non-captain players currently available in the pool.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                  {guestPoolPlayers.map((player) => (
+                    <div
+                      key={player.id}
+                      className="flex items-center justify-between rounded-md border border-border bg-accent/30 px-3 py-2"
+                      data-testid={`guest-pool-player-${player.id}`}
+                    >
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="text-sm font-medium truncate">{player.name}</span>
+                        {player.playerStatusDescription && (
+                          <Badge variant="outline" className="text-[10px] font-normal px-1.5 py-0">
+                            {player.playerStatusDescription}
+                          </Badge>
+                        )}
+                      </div>
+                      <Badge variant="secondary" className="font-normal whitespace-nowrap">
+                        ₹{player.basePrice}
+                      </Badge>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
         )}
 
         {/* Team cards */}

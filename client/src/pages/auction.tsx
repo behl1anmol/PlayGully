@@ -24,6 +24,9 @@ interface FullState {
   teams: (Team & { players: Player[] })[];
   players: Player[];
   availablePlayers: Player[];
+  settings?: {
+    maxPlayersPerTeam: number;
+  };
   auction: AuctionState;
   currentPlayer: Player | null;
 }
@@ -191,6 +194,9 @@ export default function AuctionPage() {
             <div className="flex items-center gap-2">
               <Badge variant="outline" className="text-xs">
                 Player {playersDone}/{playersTotal}
+              </Badge>
+              <Badge variant="outline" className="text-xs">
+                Max/Team {state.settings?.maxPlayersPerTeam ?? 11}
               </Badge>
               <Button
                 variant="ghost"

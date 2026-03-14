@@ -18,6 +18,9 @@ import { useAuth } from "@/lib/auth";
 import {
   Trash2,
   Plus,
+  Pencil,
+  Check,
+  X,
   Users,
   UserPlus,
   Gavel,
@@ -26,7 +29,7 @@ import {
   IndianRupee,
   ShieldCheck,
 } from "lucide-react";
-import type { Player, Team } from "@shared/schema";
+import type { Player, Setup, Team } from "@shared/schema";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 
 interface PlayerStatus {
@@ -46,9 +49,22 @@ export default function SetupPage() {
   const [teamBudget, setTeamBudget] = useState("500");
   const [captainUser, setCaptainUser] = useState("");
   const [captainPass, setCaptainPass] = useState("");
+  const [editingTeamId, setEditingTeamId] = useState<number | null>(null);
+  const [editingTeamDraft, setEditingTeamDraft] = useState<{
+    name: string;
+    budget: string;
+    captainUsername: string;
+  } | null>(null);
   const [playerName, setPlayerName] = useState("");
   const [playerStatusId, setPlayerStatusId] = useState("");
   const [manualPlayerPrice, setManualPlayerPrice] = useState("");
+  const [editingPlayerId, setEditingPlayerId] = useState<number | null>(null);
+  const [editingPlayerDraft, setEditingPlayerDraft] = useState<{
+    name: string;
+    validatePlayerStatusId: string;
+    basePrice: string;
+  } | null>(null);
+  const [maxPlayersPerTeamDraft, setMaxPlayersPerTeamDraft] = useState("11");
   const [bulkText, setBulkText] = useState("");
   const [defaultStatusId, setDefaultStatusId] = useState("");
   const [statusConfigDraft, setStatusConfigDraft] = useState<{
@@ -76,6 +92,10 @@ export default function SetupPage() {
 
   const { data: playerStatuses = [] } = useQuery<PlayerStatus[]>({
     queryKey: ["/api/player-statuses"],
+  });
+
+  const { data: setupConfig } = useQuery<Setup>({
+    queryKey: ["/api/setup"],
   });
 
   const buildStatusConfigDraft = (statuses: PlayerStatus[]) => {
@@ -122,14 +142,39 @@ export default function SetupPage() {
     [selectableStatuses, defaultStatusId],
   );
 
+  const soldPlayersCountByTeamId = useMemo(() => {
+    const counts = new Map<number, number>();
+    for (const player of players) {
+      const teamId = Number(player.teamId ?? player.soldTo);
+      if (!Number.isInteger(teamId)) continue;
+      counts.set(teamId, (counts.get(teamId) ?? 0) + 1);
+    }
+    return counts;
+  }, [players]);
+
+  const maxPlayersPerTeam = Number(setupConfig?.maxPlayersPerTeam ?? 11);
+
   const isSingleManualPriceRequired = requiresManualPlayerPrice(selectedSingleStatus?.description);
   const isBulkManualPriceRequired = requiresManualPlayerPrice(selectedBulkStatus?.description);
+  const editingPlayerStatus = useMemo(() => {
+    if (!editingPlayerDraft) return null;
+    return selectableStatuses.find(
+      (playerStatus) => playerStatus.validatePlayerStatusId === Number(editingPlayerDraft.validatePlayerStatusId),
+    ) ?? null;
+  }, [editingPlayerDraft, selectableStatuses]);
+  const isEditingPlayerManualPriceRequired = requiresManualPlayerPrice(editingPlayerStatus?.description);
 
   useEffect(() => {
     if (!statusConfigDraft && playerStatuses.length > 0) {
       setStatusConfigDraft(buildStatusConfigDraft(playerStatuses));
     }
   }, [playerStatuses, statusConfigDraft]);
+
+  useEffect(() => {
+    if (setupConfig?.maxPlayersPerTeam !== undefined && setupConfig?.maxPlayersPerTeam !== null) {
+      setMaxPlayersPerTeamDraft(String(setupConfig.maxPlayersPerTeam));
+    }
+  }, [setupConfig?.maxPlayersPerTeam]);
 
   useEffect(() => {
     if (selectableStatuses.length === 0) return;
@@ -146,6 +191,23 @@ export default function SetupPage() {
       setManualPlayerPrice("");
     }
   }, [isSingleManualPriceRequired]);
+
+  useEffect(() => {
+    if (!editingPlayerDraft || !editingPlayerStatus) return;
+    if (requiresManualPlayerPrice(editingPlayerStatus.description)) return;
+
+    const statusBasePrice = String(editingPlayerStatus.basePrice ?? "");
+    if (editingPlayerDraft.basePrice !== statusBasePrice) {
+      setEditingPlayerDraft((previous) => (
+        previous
+          ? {
+              ...previous,
+              basePrice: statusBasePrice,
+            }
+          : previous
+      ));
+    }
+  }, [editingPlayerDraft, editingPlayerStatus]);
 
   // ── Team mutations ──
   const addTeamMutation = useMutation({
@@ -181,6 +243,33 @@ export default function SetupPage() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
       queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+    },
+  });
+
+  const updateTeamMutation = useMutation({
+    mutationFn: async (payload: {
+      id: number;
+      data: { name: string; budget: number; captainUsername: string };
+    }) => {
+      const res = await apiRequest("PUT", `/api/teams/${payload.id}`, payload.data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/teams"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+      setEditingTeamId(null);
+      setEditingTeamDraft(null);
+      toast({
+        title: "Team updated",
+        description: "Team details have been saved.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to update team",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -239,12 +328,61 @@ export default function SetupPage() {
     },
   });
 
+  const saveMaxPlayersMutation = useMutation({
+    mutationFn: async (maxPlayersPerTeamValue: number) => {
+      const res = await apiRequest("POST", "/api/setup/max-players", {
+        maxPlayersPerTeam: maxPlayersPerTeamValue,
+      });
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/setup"] });
+      toast({
+        title: "Team size updated",
+        description: "Maximum players per team has been saved.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to update team size",
+        description: err.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const removePlayerMutation = useMutation({
     mutationFn: async (id: string) => {
       await apiRequest("DELETE", `/api/players/${id}`);
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+    },
+  });
+
+  const updatePlayerMutation = useMutation({
+    mutationFn: async (payload: {
+      id: number;
+      data: { name: string; validatePlayerStatusId: number; basePrice?: number };
+    }) => {
+      const res = await apiRequest("PUT", `/api/players/${payload.id}`, payload.data);
+      return res.json();
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+      setEditingPlayerId(null);
+      setEditingPlayerDraft(null);
+      toast({
+        title: "Player updated",
+        description: "Player details have been saved.",
+      });
+    },
+    onError: (err: Error) => {
+      toast({
+        title: "Failed to update player",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -445,6 +583,143 @@ export default function SetupPage() {
     });
   };
 
+  const handleSaveMaxPlayersPerTeam = () => {
+    const parsedMaxPlayersPerTeam = Number(maxPlayersPerTeamDraft);
+    if (!Number.isInteger(parsedMaxPlayersPerTeam) || parsedMaxPlayersPerTeam < 1) {
+      toast({
+        title: "Invalid team size",
+        description: "Max players per team must be a whole number >= 1.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    saveMaxPlayersMutation.mutate(parsedMaxPlayersPerTeam);
+  };
+
+  const handleStartEditTeam = (team: any) => {
+    setEditingTeamId(team.id);
+    setEditingTeamDraft({
+      name: String(team.name ?? ""),
+      budget: String(team.budget ?? team.remainingBudget ?? ""),
+      captainUsername: String(team.captainUsername ?? team.ownerName ?? ""),
+    });
+  };
+
+  const handleCancelEditTeam = () => {
+    setEditingTeamId(null);
+    setEditingTeamDraft(null);
+  };
+
+  const handleSaveEditTeam = () => {
+    if (editingTeamId === null || !editingTeamDraft) return;
+
+    const teamNameValue = editingTeamDraft.name.trim();
+    const captainUsernameValue = editingTeamDraft.captainUsername.trim();
+    const budgetValue = Number(editingTeamDraft.budget);
+
+    if (!teamNameValue || !captainUsernameValue) {
+      toast({
+        title: "Missing fields",
+        description: "Team name and captain username are required.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!Number.isInteger(budgetValue) || budgetValue <= 0) {
+      toast({
+        title: "Invalid budget",
+        description: "Team budget must be a whole number greater than 0.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    updateTeamMutation.mutate({
+      id: editingTeamId,
+      data: {
+        name: teamNameValue,
+        budget: budgetValue,
+        captainUsername: captainUsernameValue,
+      },
+    });
+  };
+
+  const handleStartEditPlayer = (player: any) => {
+    const fallbackStatusId = Number(
+      player.validatePlayerStatusId ?? selectableStatuses[0]?.validatePlayerStatusId,
+    );
+    if (!Number.isInteger(fallbackStatusId)) {
+      toast({
+        title: "Missing status",
+        description: "Player status data is unavailable. Refresh and try again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    setEditingPlayerId(player.id);
+    setEditingPlayerDraft({
+      name: String(player.name ?? ""),
+      validatePlayerStatusId: String(fallbackStatusId),
+      basePrice: String(player.basePrice ?? ""),
+    });
+  };
+
+  const handleCancelEditPlayer = () => {
+    setEditingPlayerId(null);
+    setEditingPlayerDraft(null);
+  };
+
+  const handleSaveEditPlayer = () => {
+    if (editingPlayerId === null || !editingPlayerDraft) return;
+
+    const playerNameValue = editingPlayerDraft.name.trim();
+    const validatePlayerStatusIdValue = Number(editingPlayerDraft.validatePlayerStatusId);
+
+    if (!playerNameValue) {
+      toast({
+        title: "Missing name",
+        description: "Player name is required.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    if (!Number.isInteger(validatePlayerStatusIdValue)) {
+      toast({
+        title: "Invalid status",
+        description: "Select a valid player status.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    const payload: { name: string; validatePlayerStatusId: number; basePrice?: number } = {
+      name: playerNameValue,
+      validatePlayerStatusId: validatePlayerStatusIdValue,
+    };
+
+    if (isEditingPlayerManualPriceRequired) {
+      const basePriceValue = Number(editingPlayerDraft.basePrice);
+      if (!Number.isInteger(basePriceValue) || basePriceValue <= 0) {
+        toast({
+          title: "Invalid price",
+          description: "Silver/Bronze players require a whole-number base price > 0.",
+          variant: "destructive",
+        });
+        return;
+      }
+      payload.basePrice = basePriceValue;
+    }
+
+    updatePlayerMutation.mutate({
+      id: editingPlayerId,
+      data: payload,
+    });
+  };
+
   const canStart =
     teams.length === 2 &&
     players.length >= 1 &&
@@ -517,6 +792,28 @@ export default function SetupPage() {
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
+            <div className="flex items-end gap-2 p-3 rounded-lg border border-border bg-accent/20">
+              <div className="space-y-1">
+                <label className="text-xs text-muted-foreground">Max players per team</label>
+                <Input
+                  type="number"
+                  min={1}
+                  value={maxPlayersPerTeamDraft}
+                  onChange={(e) => setMaxPlayersPerTeamDraft(e.target.value)}
+                  className="w-36"
+                  data-testid="input-max-players-per-team"
+                />
+              </div>
+              <Button
+                size="sm"
+                onClick={handleSaveMaxPlayersPerTeam}
+                disabled={saveMaxPlayersMutation.isPending}
+                data-testid="button-save-max-players-per-team"
+              >
+                Save Team Size
+              </Button>
+            </div>
+
             {teams.length < 2 && (
               <div className="space-y-3 p-4 rounded-lg border border-dashed border-border bg-accent/20">
                 <div className="grid grid-cols-2 gap-2">
@@ -588,30 +885,115 @@ export default function SetupPage() {
                             backgroundColor: `hsl(var(--chart-${i + 1}))`,
                           }}
                         />
-                        <span className="font-semibold text-sm">
-                          {team.name}
+                        <span className="font-semibold text-sm">{team.name}</span>
+                      </div>
+                      <div className="flex items-center gap-1">
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() =>
+                            editingTeamId === team.id ? handleCancelEditTeam() : handleStartEditTeam(team)
+                          }
+                          className="h-7 w-7 p-0 text-muted-foreground"
+                          data-testid={`button-edit-team-${team.id}`}
+                        >
+                          {editingTeamId === team.id ? (
+                            <X className="w-3.5 h-3.5" />
+                          ) : (
+                            <Pencil className="w-3.5 h-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          onClick={() => removeTeamMutation.mutate(team.id)}
+                          className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                          data-testid={`button-remove-team-${team.id}`}
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </Button>
+                      </div>
+                    </div>
+
+                    {editingTeamId === team.id && editingTeamDraft ? (
+                      <div className="space-y-2 rounded-md border border-border bg-background/70 p-2">
+                        <div className="grid grid-cols-1 gap-2 sm:grid-cols-2">
+                          <Input
+                            value={editingTeamDraft.name}
+                            onChange={(event) =>
+                              setEditingTeamDraft((previous) =>
+                                previous
+                                  ? {
+                                      ...previous,
+                                      name: event.target.value,
+                                    }
+                                  : previous,
+                              )
+                            }
+                            placeholder="Team name"
+                            data-testid={`input-edit-team-name-${team.id}`}
+                          />
+                          <Input
+                            value={editingTeamDraft.captainUsername}
+                            onChange={(event) =>
+                              setEditingTeamDraft((previous) =>
+                                previous
+                                  ? {
+                                      ...previous,
+                                      captainUsername: event.target.value,
+                                    }
+                                  : previous,
+                              )
+                            }
+                            placeholder="Captain username"
+                            data-testid={`input-edit-team-captain-${team.id}`}
+                          />
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <Input
+                            type="number"
+                            min={1}
+                            value={editingTeamDraft.budget}
+                            onChange={(event) =>
+                              setEditingTeamDraft((previous) =>
+                                previous
+                                  ? {
+                                      ...previous,
+                                      budget: event.target.value,
+                                    }
+                                  : previous,
+                              )
+                            }
+                            placeholder="Team budget"
+                            className="w-40"
+                            data-testid={`input-edit-team-budget-${team.id}`}
+                          />
+                          <Button
+                            size="sm"
+                            onClick={handleSaveEditTeam}
+                            disabled={updateTeamMutation.isPending}
+                            data-testid={`button-save-team-${team.id}`}
+                          >
+                            <Check className="w-3.5 h-3.5 mr-1" />
+                            Save
+                          </Button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                        <span className="flex items-center gap-1">
+                          <IndianRupee className="w-3 h-3" />
+                          Budget: ₹{team.budget}
+                        </span>
+                        <span>
+                          Players: {soldPlayersCountByTeamId.get(team.id) ?? 0}/{maxPlayersPerTeam}
+                        </span>
+                        <span className="flex items-center gap-1">
+                          <ShieldCheck className="w-3 h-3" />
+                          Captain: {team.captainUsername}
                         </span>
                       </div>
-                      <Button
-                        variant="ghost"
-                        size="sm"
-                        onClick={() => removeTeamMutation.mutate(team.id)}
-                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
-                        data-testid={`button-remove-team-${team.id}`}
-                      >
-                        <Trash2 className="w-3.5 h-3.5" />
-                      </Button>
-                    </div>
-                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
-                      <span className="flex items-center gap-1">
-                        <IndianRupee className="w-3 h-3" />
-                        Budget: ₹{team.budget}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <ShieldCheck className="w-3 h-3" />
-                        Captain: {team.captainUsername}
-                      </span>
-                    </div>
+                    )}
                   </div>
                 ))}
               </div>
@@ -886,28 +1268,132 @@ export default function SetupPage() {
             {players.length > 0 ? (
               <div className="flex flex-wrap gap-2">
                 {players.map((player: any) => (
-                  <div
-                    key={player.id}
-                    className="flex items-center gap-1.5 bg-accent/50 border border-border rounded-full px-3 py-1 text-sm"
-                    data-testid={`player-chip-${player.id}`}
-                  >
-                    <span>{player.name}</span>
-                    <span className="text-xs text-muted-foreground">
-                      ₹{player.basePrice}
-                    </span>
-                    {player.playerStatusDescription && (
-                      <Badge variant="outline" className="text-[10px] font-normal px-1.5 py-0">
-                        {player.playerStatusDescription}
-                      </Badge>
-                    )}
-                    <button
-                      onClick={() => removePlayerMutation.mutate(player.id)}
-                      className="text-muted-foreground hover:text-destructive transition-colors ml-0.5"
-                      data-testid={`button-remove-player-${player.id}`}
+                  editingPlayerId === player.id && editingPlayerDraft ? (
+                    <div
+                      key={player.id}
+                      className="flex flex-wrap items-center gap-2 bg-accent/50 border border-border rounded-md px-2 py-2 text-sm"
+                      data-testid={`player-edit-${player.id}`}
                     >
-                      <Trash2 className="w-3 h-3" />
-                    </button>
-                  </div>
+                      <Input
+                        value={editingPlayerDraft.name}
+                        onChange={(event) =>
+                          setEditingPlayerDraft((previous) =>
+                            previous
+                              ? {
+                                  ...previous,
+                                  name: event.target.value,
+                                }
+                              : previous,
+                          )
+                        }
+                        className="h-8 w-36"
+                        placeholder="Player name"
+                        data-testid={`input-edit-player-name-${player.id}`}
+                      />
+                      <Select
+                        value={editingPlayerDraft.validatePlayerStatusId}
+                        onValueChange={(value) =>
+                          setEditingPlayerDraft((previous) =>
+                            previous
+                              ? {
+                                  ...previous,
+                                  validatePlayerStatusId: value,
+                                }
+                              : previous,
+                          )
+                        }
+                      >
+                        <SelectTrigger className="h-8 w-28" data-testid={`select-edit-player-status-${player.id}`}>
+                          <SelectValue placeholder="Status" />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {selectableStatuses.map((playerStatus) => (
+                            <SelectItem
+                              key={playerStatus.validatePlayerStatusId}
+                              value={String(playerStatus.validatePlayerStatusId)}
+                            >
+                              {playerStatus.description}
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+
+                      {isEditingPlayerManualPriceRequired ? (
+                        <Input
+                          type="number"
+                          min={1}
+                          value={editingPlayerDraft.basePrice}
+                          onChange={(event) =>
+                            setEditingPlayerDraft((previous) =>
+                              previous
+                                ? {
+                                    ...previous,
+                                    basePrice: event.target.value,
+                                  }
+                                : previous,
+                            )
+                          }
+                          className="h-8 w-24"
+                          placeholder="Price"
+                          data-testid={`input-edit-player-price-${player.id}`}
+                        />
+                      ) : (
+                        <div className="h-8 min-w-20 rounded-md border border-input bg-muted/40 px-2 text-xs flex items-center justify-center whitespace-nowrap">
+                          ₹{editingPlayerStatus?.basePrice ?? "-"}
+                        </div>
+                      )}
+
+                      <Button
+                        size="sm"
+                        className="h-8"
+                        onClick={handleSaveEditPlayer}
+                        disabled={updatePlayerMutation.isPending}
+                        data-testid={`button-save-player-${player.id}`}
+                      >
+                        <Check className="w-3.5 h-3.5 mr-1" />
+                        Save
+                      </Button>
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        className="h-8"
+                        onClick={handleCancelEditPlayer}
+                        data-testid={`button-cancel-player-${player.id}`}
+                      >
+                        <X className="w-3.5 h-3.5" />
+                      </Button>
+                    </div>
+                  ) : (
+                    <div
+                      key={player.id}
+                      className="flex items-center gap-1.5 bg-accent/50 border border-border rounded-full px-3 py-1 text-sm"
+                      data-testid={`player-chip-${player.id}`}
+                    >
+                      <span>{player.name}</span>
+                      <span className="text-xs text-muted-foreground">
+                        ₹{player.basePrice}
+                      </span>
+                      {player.playerStatusDescription && (
+                        <Badge variant="outline" className="text-[10px] font-normal px-1.5 py-0">
+                          {player.playerStatusDescription}
+                        </Badge>
+                      )}
+                      <button
+                        onClick={() => handleStartEditPlayer(player)}
+                        className="text-muted-foreground hover:text-foreground transition-colors ml-0.5"
+                        data-testid={`button-edit-player-${player.id}`}
+                      >
+                        <Pencil className="w-3 h-3" />
+                      </button>
+                      <button
+                        onClick={() => removePlayerMutation.mutate(player.id)}
+                        className="text-muted-foreground hover:text-destructive transition-colors ml-0.5"
+                        data-testid={`button-remove-player-${player.id}`}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </button>
+                    </div>
+                  )
                 ))}
               </div>
             ) : (

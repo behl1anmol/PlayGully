@@ -90,6 +90,7 @@ export const storage = {
         await db.insert(schema.setup).values({
           teamCount: 2,
           budgetPerTeam: 500,
+          maxPlayersPerTeam: 11,
           password: "appl2026",
         });
         console.log("Initialized setup with default password: appl2026");
@@ -241,16 +242,46 @@ export const storage = {
     return result[0] || null;
   },
 
-  async saveSetup(data: { teamCount: number; budgetPerTeam: number; password?: string }) {
+  async saveSetup(data: {
+    teamCount: number;
+    budgetPerTeam: number;
+    maxPlayersPerTeam?: number;
+    password?: string;
+  }) {
     const existing = await db.select().from(schema.setup).limit(1);
     if (existing.length > 0) {
       const updated = await db.update(schema.setup)
-        .set({ teamCount: data.teamCount, budgetPerTeam: data.budgetPerTeam, ...(data.password ? { password: data.password } : {}) })
+        .set({
+          teamCount: data.teamCount,
+          budgetPerTeam: data.budgetPerTeam,
+          ...(data.maxPlayersPerTeam !== undefined ? { maxPlayersPerTeam: data.maxPlayersPerTeam } : {}),
+          ...(data.password ? { password: data.password } : {}),
+        })
         .where(eq(schema.setup.id, existing[0].id))
         .returning();
       return updated[0];
     }
     const inserted = await db.insert(schema.setup).values(data).returning();
+    return inserted[0];
+  },
+
+  async updateMaxPlayersPerTeam(maxPlayersPerTeam: number) {
+    const existing = await db.select().from(schema.setup).limit(1);
+    if (existing.length > 0) {
+      const updated = await db
+        .update(schema.setup)
+        .set({ maxPlayersPerTeam })
+        .where(eq(schema.setup.id, existing[0].id))
+        .returning();
+      return updated[0];
+    }
+
+    const inserted = await db.insert(schema.setup).values({
+      teamCount: 2,
+      budgetPerTeam: 500,
+      maxPlayersPerTeam,
+      password: "appl2026",
+    }).returning();
     return inserted[0];
   },
 

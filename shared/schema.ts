@@ -11,6 +11,7 @@ export const setup = pgTable("setup", {
   id: serial("id").primaryKey(),
   teamCount: integer("team_count").notNull(),
   budgetPerTeam: integer("budget_per_team").notNull(),
+  maxPlayersPerTeam: integer("max_players_per_team").notNull().default(11),
   password: text("password").notNull().default("admin123"),
 });
 

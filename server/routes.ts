@@ -101,6 +101,9 @@ async function getUiState() {
     teams,
     players,
     availablePlayers: players.filter((player) => player.teamId == null),
+    settings: {
+      maxPlayersPerTeam: setup?.maxPlayersPerTeam ?? 11,
+    },
     auction,
     currentPlayer,
   };
@@ -193,14 +196,59 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/setup", async (req, res) => {
     try {
-      const { teamCount, budgetPerTeam, password } = req.body;
+      const { teamCount, budgetPerTeam, maxPlayersPerTeam, password } = req.body;
       if (!teamCount || !budgetPerTeam) {
         return res.status(400).json({ message: "Team count and budget required" });
       }
-      const setup = await storage.saveSetup({ teamCount, budgetPerTeam, password });
+
+      const parsedMaxPlayersPerTeam =
+        maxPlayersPerTeam !== undefined ? Number(maxPlayersPerTeam) : undefined;
+      if (
+        parsedMaxPlayersPerTeam !== undefined &&
+        (!Number.isInteger(parsedMaxPlayersPerTeam) || parsedMaxPlayersPerTeam < 1)
+      ) {
+        return res.status(400).json({ message: "Max players per team must be a whole number >= 1" });
+      }
+
+      const setup = await storage.saveSetup({
+        teamCount,
+        budgetPerTeam,
+        maxPlayersPerTeam: parsedMaxPlayersPerTeam,
+        password,
+      });
       res.json(setup);
     } catch (error) {
       res.status(500).json({ message: "Failed to save setup" });
+    }
+  });
+
+  app.post("/api/setup/max-players", async (req, res) => {
+    try {
+      const maxPlayersPerTeam = Number(req.body?.maxPlayersPerTeam);
+      if (!Number.isInteger(maxPlayersPerTeam) || maxPlayersPerTeam < 1) {
+        return res.status(400).json({ message: "Max players per team must be a whole number >= 1" });
+      }
+
+      const [teams, players] = await Promise.all([
+        storage.getTeams(),
+        storage.getPlayers(),
+      ]);
+
+      const violatingTeam = teams.find((team) => {
+        const soldPlayersCount = players.filter((player) => player.soldTo === team.id).length;
+        return soldPlayersCount > maxPlayersPerTeam;
+      });
+
+      if (violatingTeam) {
+        return res.status(400).json({
+          message: `Cannot set max players to ${maxPlayersPerTeam}. Team ${violatingTeam.name} already has more players than this limit.`,
+        });
+      }
+
+      const setup = await storage.updateMaxPlayersPerTeam(maxPlayersPerTeam);
+      res.json(setup);
+    } catch (error) {
+      res.status(500).json({ message: "Failed to update max players per team" });
     }
   });
 
@@ -604,6 +652,19 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!teamId || !amount) {
         return res.status(400).json({ message: "Team ID and amount required" });
       }
+
+      const [setup, players] = await Promise.all([
+        storage.getSetup(),
+        storage.getPlayers(),
+      ]);
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const soldPlayersCount = players.filter((player) => player.soldTo === Number(teamId)).length;
+      if (soldPlayersCount >= maxPlayersPerTeam) {
+        return res.status(400).json({
+          message: `Rule violation: Team already has maximum allowed players (${maxPlayersPerTeam})`,
+        });
+      }
+
       await storage.placeBid(Number(teamId), Number(amount));
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -614,11 +675,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/sell", async (req, res) => {
     try {
-      const [auctionState, players, teams, statusRules] = await Promise.all([
+      const [auctionState, players, teams, statusRules, setup] = await Promise.all([
         storage.getAuctionState(),
         storage.getPlayers(),
         storage.getTeams(),
         storage.getPlayerStatusRules(),
+        storage.getSetup(),
       ]);
 
       if (!auctionState || !auctionState.currentPlayerId || !auctionState.currentBidTeamId || !auctionState.currentBid) {
@@ -628,6 +690,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const currentPlayer = players.find((player) => player.id === auctionState.currentPlayerId);
       if (!currentPlayer) {
         return res.status(404).json({ message: "Current player not found" });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const soldPlayersCountForTeam = players.filter(
+        (player) => player.soldTo === auctionState.currentBidTeamId,
+      ).length;
+
+      if (soldPlayersCountForTeam >= maxPlayersPerTeam) {
+        return res.status(400).json({
+          message: `Rule violation: Team already has maximum allowed players (${maxPlayersPerTeam})`,
+        });
       }
 
       const currentStatusRule = statusRules.find(
