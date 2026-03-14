@@ -5,19 +5,15 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
-import { Trophy, IndianRupee, RotateCcw, LogOut, Users } from "lucide-react";
-import type { Player, Team } from "@shared/schema";
+import { RotateCcw, Trophy, LogOut, IndianRupee, Gavel } from "lucide-react";
+import type { Player, Team, AuctionState } from "@shared/schema";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
 
-interface TeamWithPlayers extends Team {
-  players: Player[];
-}
-
 interface FullState {
-  teams: TeamWithPlayers[];
+  teams: (Team & { players: Player[] })[];
   players: Player[];
   availablePlayers: Player[];
-  auction: { phase: string };
+  auction: AuctionState;
   currentPlayer: Player | null;
 }
 
@@ -26,8 +22,14 @@ export default function ResultsPage() {
   const { session, sessionRef, logout } = useAuth();
   const activeSession = session || sessionRef.current;
 
-  const { data: state } = useQuery<FullState>({
+  if (!activeSession) {
+    navigate("/");
+    return null;
+  }
+
+  const { data: state, isLoading } = useQuery<FullState>({
     queryKey: ["/api/state"],
+    refetchInterval: 3000,
   });
 
   const resetMutation = useMutation({
@@ -40,45 +42,54 @@ export default function ResultsPage() {
     },
   });
 
-  if (!activeSession) {
-    navigate("/");
-    return null;
+  if (isLoading || !state) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-muted-foreground text-sm">Loading...</div>
+      </div>
+    );
   }
 
-  if (!state) {
-    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
-  }
-
-  const { teams, availablePlayers } = state;
   const isAdmin = activeSession.role === "admin";
-
-  // Sort teams by players count descending, then by money spent
-  const sortedTeams = [...teams].sort((a, b) => {
-    if (b.players.length !== a.players.length) return b.players.length - a.players.length;
-    return b.spent - a.spent;
-  });
+  const isCompleted = state.auction.phase === "completed";
+  const isAuctionLive = state.auction.phase === "auction";
+  const unsoldPlayers = state.players.filter(
+    (p) => !p.teamId && state.auction.phase === "completed"
+  );
 
   return (
     <div className="min-h-screen bg-background">
+      {/* Header */}
       <header className="border-b border-border bg-card">
         <div className="max-w-5xl mx-auto px-4 py-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center">
-                <Trophy className="w-5 h-5 text-primary-foreground" />
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-label="APPL">
+                  <circle cx="12" cy="12" r="6" stroke="white" strokeWidth="2" />
+                  <line x1="12" y1="2" x2="12" y2="6" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <line x1="12" y1="18" x2="12" y2="22" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <line x1="6" y1="12" x2="2" y2="12" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                  <line x1="22" y1="12" x2="18" y2="12" stroke="white" strokeWidth="2" strokeLinecap="round" />
+                </svg>
               </div>
               <div>
-                <h1 className="text-lg font-bold tracking-tight">Auction Results</h1>
-                <p className="text-xs text-muted-foreground">Apna Park Premiere League</p>
+                <h1 className="text-lg font-bold tracking-tight">
+                  Apna Park Premiere League
+                </h1>
+                <p className="text-xs text-muted-foreground">
+                  {isCompleted ? "Final Teams" : isAuctionLive ? "Auction Live" : "Results"}
+                </p>
               </div>
             </div>
             <div className="flex items-center gap-2">
-              {isAdmin && (
+              {isAdmin && isCompleted && (
                 <Button
-                  variant="secondary"
+                  variant="ghost"
                   size="sm"
                   onClick={() => resetMutation.mutate()}
-                  disabled={resetMutation.isPending}
+                  className="text-muted-foreground"
+                  data-testid="button-new-auction"
                 >
                   <RotateCcw className="w-4 h-4 mr-1" />
                   New Auction
@@ -87,8 +98,12 @@ export default function ResultsPage() {
               <Button
                 variant="ghost"
                 size="sm"
-                onClick={() => { logout(); navigate("/"); }}
+                onClick={() => {
+                  logout();
+                  navigate("/");
+                }}
                 className="text-muted-foreground"
+                data-testid="button-logout"
               >
                 <LogOut className="w-4 h-4 mr-1" />
                 Logout
@@ -99,78 +114,154 @@ export default function ResultsPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
-        {/* Team summary cards */}
-        <div className="grid gap-4 md:grid-cols-2">
-          {sortedTeams.map((team, idx) => (
-            <Card key={team.id} className={idx === 0 ? "ring-1 ring-primary" : ""}>
-              <CardHeader className="pb-3">
-                <CardTitle className="flex items-center gap-2">
-                  <div className="w-4 h-4 rounded-full" style={{ backgroundColor: team.color }} />
-                  {team.name}
-                  {idx === 0 && <Badge className="ml-auto">Most Players</Badge>}
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-3">
-                <div className="grid grid-cols-3 gap-2 text-center">
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-lg font-bold">{team.players.length}</p>
-                    <p className="text-xs text-muted-foreground">Players</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-lg font-bold flex items-center justify-center">
-                      <IndianRupee className="w-4 h-4" />{team.spent}
-                    </p>
-                    <p className="text-xs text-muted-foreground">Spent</p>
-                  </div>
-                  <div className="rounded-md bg-muted p-2">
-                    <p className="text-lg font-bold flex items-center justify-center">
-                      <IndianRupee className="w-4 h-4" />{team.budget - team.spent}
-                    </p>
-                    <p className="text-xs text-muted-foreground">Remaining</p>
-                  </div>
-                </div>
+        {/* Status banner */}
+        {isCompleted && (
+          <div className="rounded-xl p-6 text-center bg-primary/8 border border-primary/15">
+            <Trophy className="w-10 h-10 mx-auto text-primary mb-2" />
+            <h2
+              className="text-xl font-bold"
+              data-testid="text-auction-complete"
+            >
+              Auction Complete
+            </h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              {state.players.filter((p) => p.teamId).length} of{" "}
+              {state.players.length} players sold.
+            </p>
+          </div>
+        )}
 
-                {/* Player list */}
-                <div className="space-y-1">
+        {isAuctionLive && (
+          <div className="rounded-xl p-5 text-center bg-chart-4/10 border border-chart-4/20">
+            <Gavel className="w-8 h-8 mx-auto text-chart-4 mb-2" />
+            <h2 className="text-lg font-bold">Auction In Progress</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              Teams are being built live. Check back for final results.
+            </p>
+          </div>
+        )}
+
+        {state.auction.phase === "setup" && (
+          <div className="rounded-xl p-5 text-center bg-muted border border-border">
+            <Gavel className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
+            <h2 className="text-lg font-bold">Auction Not Started</h2>
+            <p className="text-sm text-muted-foreground mt-1">
+              The admin hasn't started the auction yet.
+            </p>
+          </div>
+        )}
+
+        {/* Team cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {state.teams.map((team, i) => {
+            const remaining = team.budget - team.spent;
+            const totalSpent = team.players.reduce(
+              (sum, p) => sum + (p.soldPrice || 0),
+              0
+            );
+
+            return (
+              <Card key={team.id} data-testid={`card-final-team-${team.id}`}>
+                <CardHeader className="pb-3">
+                  <CardTitle className="text-base font-semibold flex items-center gap-2">
+                    <div
+                      className="w-4 h-4 rounded-full"
+                      style={{
+                        backgroundColor: `hsl(var(--chart-${i + 1}))`,
+                      }}
+                    />
+                    {team.name}
+                    <Badge
+                      variant="secondary"
+                      className="ml-auto font-normal"
+                    >
+                      {team.players.length} players
+                    </Badge>
+                  </CardTitle>
+                </CardHeader>
+                <CardContent className="space-y-3">
+                  {/* Budget summary */}
+                  <div className="flex justify-between text-xs text-muted-foreground px-1">
+                    <span>
+                      Spent: ₹{totalSpent} / ₹{team.budget}
+                    </span>
+                    <span>Remaining: ₹{remaining}</span>
+                  </div>
+
+                  {/* Roster */}
                   {team.players.length === 0 ? (
-                    <p className="text-sm text-muted-foreground text-center py-2">No players</p>
+                    <p className="text-sm text-muted-foreground text-center py-4">
+                      No players bought
+                    </p>
                   ) : (
-                    team.players.map((p) => (
-                      <div key={p.id} className="flex justify-between text-sm px-1">
-                        <span>{p.name}</span>
-                        <span className="text-muted-foreground flex items-center">
-                          <IndianRupee className="w-3 h-3" />{p.soldPrice}
-                        </span>
-                      </div>
-                    ))
+                    <div className="space-y-1">
+                      {team.players.map((player, j) => (
+                        <div
+                          key={player.id}
+                          className="flex items-center justify-between text-sm py-2 px-3 rounded-md bg-accent/40"
+                          data-testid={`text-final-player-${player.id}`}
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-muted-foreground font-mono w-4 text-right">
+                              {j + 1}.
+                            </span>
+                            <span className="font-medium">{player.name}</span>
+                          </div>
+                          <Badge variant="outline" className="text-xs font-normal">
+                            ₹{player.soldPrice}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
                   )}
-                </div>
-              </CardContent>
-            </Card>
-          ))}
+                </CardContent>
+              </Card>
+            );
+          })}
         </div>
 
         {/* Unsold players */}
-        {availablePlayers.length > 0 && (
+        {isCompleted && unsoldPlayers.length > 0 && (
           <Card>
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <Users className="w-4 h-4" />
-                Unsold Players ({availablePlayers.length})
+            <CardHeader className="pb-3">
+              <CardTitle className="text-base font-semibold text-muted-foreground">
+                Unsold Players
               </CardTitle>
             </CardHeader>
             <CardContent>
               <div className="flex flex-wrap gap-2">
-                {availablePlayers.map((p) => (
-                  <Badge key={p.id} variant="secondary">{p.name}</Badge>
+                {unsoldPlayers.map((p) => (
+                  <Badge
+                    key={p.id}
+                    variant="outline"
+                    className="font-normal text-muted-foreground"
+                  >
+                    {p.name} (₹{p.basePrice})
+                  </Badge>
                 ))}
               </div>
             </CardContent>
           </Card>
         )}
+
+        {/* Admin actions */}
+        {isAdmin && isCompleted && (
+          <div className="flex justify-center pt-2 pb-8">
+            <Button
+              variant="outline"
+              onClick={() => resetMutation.mutate()}
+              data-testid="button-start-over"
+            >
+              <RotateCcw className="w-4 h-4 mr-1" />
+              Start New Auction
+            </Button>
+          </div>
+        )}
       </main>
 
-      <PerplexityAttribution />
+      <footer className="border-t border-border mt-auto py-4 text-center">
+        <PerplexityAttribution />
+      </footer>
     </div>
   );
 }

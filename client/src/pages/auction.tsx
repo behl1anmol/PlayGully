@@ -10,11 +10,12 @@ import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
 import {
   Gavel,
-  SkipForward,
-  Trophy,
   IndianRupee,
+  User,
+  SkipForward,
+  CheckCircle2,
   LogOut,
-  Users,
+  Trophy,
 } from "lucide-react";
 import type { Player, Team, AuctionState } from "@shared/schema";
 import { PerplexityAttribution } from "@/components/PerplexityAttribution";
@@ -34,14 +35,19 @@ export default function AuctionPage() {
   const { session, sessionRef, logout } = useAuth();
   const activeSession = session || sessionRef.current;
 
+  if (!activeSession || (activeSession.role !== "admin" && activeSession.role !== "captain")) {
+    navigate("/");
+    return null;
+  }
+
   const { data: state, isLoading } = useQuery<FullState>({
     queryKey: ["/api/state"],
-    refetchInterval: 2000,
+    refetchInterval: 1500,
   });
 
   const bidMutation = useMutation({
-    mutationFn: async ({ teamId, amount }: { teamId: string; amount: number }) => {
-      const res = await apiRequest("POST", "/api/auction/bid", { teamId, amount });
+    mutationFn: async (data: { teamId: string; amount: number }) => {
+      const res = await apiRequest("POST", "/api/auction/bid", data);
       return res.json();
     },
     onSuccess: () => {
@@ -49,7 +55,11 @@ export default function AuctionPage() {
       setBidAmount("");
     },
     onError: (err: Error) => {
-      toast({ title: "Bid failed", description: err.message, variant: "destructive" });
+      toast({
+        title: "Bid failed",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -58,11 +68,18 @@ export default function AuctionPage() {
       const res = await apiRequest("POST", "/api/auction/sell");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/state"] });
+      if (data.state?.phase === "completed") {
+        navigate("/results");
+      }
     },
     onError: (err: Error) => {
-      toast({ title: "Error", description: err.message, variant: "destructive" });
+      toast({
+        title: "Error",
+        description: err.message,
+        variant: "destructive",
+      });
     },
   });
 
@@ -71,18 +88,48 @@ export default function AuctionPage() {
       const res = await apiRequest("POST", "/api/auction/skip");
       return res.json();
     },
-    onSuccess: () => {
+    onSuccess: (data: any) => {
       queryClient.invalidateQueries({ queryKey: ["/api/state"] });
+      if (data.phase === "completed") {
+        navigate("/results");
+      }
     },
   });
 
-  if (!activeSession) {
-    navigate("/");
-    return null;
+  if (isLoading || !state) {
+    return (
+      <div className="min-h-screen bg-background flex items-center justify-center">
+        <div className="text-muted-foreground text-sm">Loading auction...</div>
+      </div>
+    );
   }
 
-  if (isLoading || !state) {
-    return <div className="min-h-screen flex items-center justify-center">Loading...</div>;
+  if (state.auction.phase === "setup") {
+    if (activeSession.role === "admin") {
+      navigate("/admin");
+    } else {
+      return (
+        <div className="min-h-screen bg-background flex items-center justify-center px-4">
+          <Card className="max-w-sm w-full text-center">
+            <CardContent className="py-10 space-y-3">
+              <Gavel className="w-10 h-10 mx-auto text-muted-foreground" />
+              <h2 className="text-lg font-semibold">Auction Not Started</h2>
+              <p className="text-sm text-muted-foreground">
+                Wait for the admin to start the auction.
+              </p>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => queryClient.invalidateQueries({ queryKey: ["/api/state"] })}
+              >
+                Refresh
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
+      );
+    }
+    return null;
   }
 
   if (state.auction.phase === "completed") {
@@ -90,25 +137,33 @@ export default function AuctionPage() {
     return null;
   }
 
-  const { auction, currentPlayer, teams } = state;
   const isAdmin = activeSession.role === "admin";
   const isCaptain = activeSession.role === "captain";
-  const myTeam = isCaptain ? teams.find((t) => t.id === activeSession.teamId) : null;
-  const myTeamBudgetLeft = myTeam ? myTeam.budget - myTeam.spent : 0;
+  const myTeamId = activeSession.teamId;
+  const myTeam = state.teams.find((t) => t.id === myTeamId);
+  const currentPlayer = state.currentPlayer;
+  const currentBidder = state.teams.find(
+    (t) => t.id === state.auction.currentBidderId
+  );
+
+  const playersDone =
+    state.auction.currentPlayerIndex + 1;
+  const playersTotal = state.auction.playerOrder.length;
 
   const handleBid = () => {
-    if (!isCaptain || !myTeam) return;
+    if (!myTeamId) return;
     const amount = parseInt(bidAmount);
-    if (isNaN(amount)) {
-      toast({ title: "Invalid bid", description: "Enter a valid number", variant: "destructive" });
-      return;
-    }
-    bidMutation.mutate({ teamId: myTeam.id, amount });
+    if (!amount || amount < 1) return;
+    bidMutation.mutate({ teamId: myTeamId, amount });
   };
 
-  const totalPlayers = auction.playerOrder.length;
-  const donePlayers = auction.currentPlayerIndex;
-  const progress = totalPlayers > 0 ? (donePlayers / totalPlayers) * 100 : 0;
+  const quickBids = currentPlayer
+    ? [
+        state.auction.currentBid + 1,
+        state.auction.currentBid + 5,
+        state.auction.currentBid + 10,
+      ].filter((b) => b <= 100 && (myTeam ? b <= myTeam.budget - myTeam.spent : true))
+    : [];
 
   return (
     <div className="min-h-screen bg-background">
@@ -118,7 +173,7 @@ export default function AuctionPage() {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-3">
               <div className="w-10 h-10 rounded-lg bg-primary flex items-center justify-center">
-                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-label="APPL Logo">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-label="APPL">
                   <circle cx="12" cy="12" r="6" stroke="white" strokeWidth="2" />
                   <line x1="12" y1="2" x2="12" y2="6" stroke="white" strokeWidth="2" strokeLinecap="round" />
                   <line x1="12" y1="18" x2="12" y2="22" stroke="white" strokeWidth="2" strokeLinecap="round" />
@@ -127,206 +182,255 @@ export default function AuctionPage() {
                 </svg>
               </div>
               <div>
-                <h1 className="text-lg font-bold tracking-tight">Apna Park Premiere League</h1>
+                <h1 className="text-lg font-bold tracking-tight">APPL Auction</h1>
                 <p className="text-xs text-muted-foreground">
-                  {isAdmin ? "Admin" : `${myTeam?.name ?? ""} — Captain`}
+                  {isAdmin ? "Admin Control" : `Captain: ${myTeam?.name}`}
                 </p>
               </div>
             </div>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => { logout(); navigate("/"); }}
-              className="text-muted-foreground"
-            >
-              <LogOut className="w-4 h-4 mr-1" />
-              Logout
-            </Button>
+            <div className="flex items-center gap-2">
+              <Badge variant="outline" className="text-xs">
+                Player {playersDone}/{playersTotal}
+              </Badge>
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={() => {
+                  logout();
+                  navigate("/");
+                }}
+                className="text-muted-foreground"
+                data-testid="button-logout"
+              >
+                <LogOut className="w-4 h-4" />
+              </Button>
+            </div>
           </div>
         </div>
       </header>
 
-      <main className="max-w-5xl mx-auto px-4 py-6 space-y-4">
-        {/* Progress */}
-        <div className="space-y-1">
-          <div className="flex justify-between text-xs text-muted-foreground">
-            <span>Player {donePlayers} of {totalPlayers}</span>
-            <span>{Math.round(progress)}%</span>
-          </div>
-          <div className="h-1.5 w-full rounded-full bg-muted overflow-hidden">
-            <div
-              className="h-full bg-primary transition-all"
-              style={{ width: `${progress}%` }}
-            />
-          </div>
-        </div>
-
-        {currentPlayer ? (
-          <div className="grid gap-4 md:grid-cols-2">
-            {/* Player on block */}
-            <Card>
-              <CardHeader>
-                <CardTitle className="text-base flex items-center gap-2">
-                  <Gavel className="w-4 h-4" />
-                  On the Block
-                </CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div>
-                  <p className="text-2xl font-bold">{currentPlayer.name}</p>
+      <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+        {/* Current Player On Block */}
+        {currentPlayer && (
+          <Card className="overflow-hidden" data-testid="card-current-player">
+            <div className="bg-primary/8 border-b border-primary/10 px-5 py-4 text-center">
+              <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide mb-1">
+                Now on the block
+              </p>
+              <h2 className="text-xl font-bold" data-testid="text-current-player-name">
+                {currentPlayer.name}
+              </h2>
+              <p className="text-sm text-muted-foreground mt-0.5">
+                Base price: ₹{currentPlayer.basePrice}
+              </p>
+            </div>
+            <CardContent className="py-5">
+              <div className="text-center space-y-1">
+                <p className="text-xs text-muted-foreground uppercase tracking-wide">
+                  Current bid
+                </p>
+                <div className="flex items-center justify-center gap-1">
+                  <IndianRupee className="w-6 h-6 text-primary" />
+                  <span
+                    className="text-3xl font-bold tabular-nums"
+                    data-testid="text-current-bid"
+                  >
+                    {state.auction.currentBid}
+                  </span>
+                </div>
+                {currentBidder ? (
+                  <p className="text-sm font-medium" data-testid="text-current-bidder">
+                    by {currentBidder.name}
+                  </p>
+                ) : (
                   <p className="text-sm text-muted-foreground">
-                    Base price: <IndianRupee className="inline w-3 h-3" />{currentPlayer.basePrice}
+                    No bids yet
                   </p>
-                </div>
+                )}
+              </div>
 
-                <div className="rounded-lg border border-border bg-muted/50 p-4 text-center">
-                  <p className="text-xs text-muted-foreground mb-1">Current Bid</p>
-                  <p className="text-3xl font-bold">
-                    <IndianRupee className="inline w-6 h-6" />{auction.currentBid}
-                  </p>
-                  {auction.currentBidderId && (
-                    <p className="text-xs text-muted-foreground mt-1">
-                      by {teams.find((t) => t.id === auction.currentBidderId)?.name ?? "Unknown"}
-                    </p>
-                  )}
-                </div>
-
-                {/* Captain bid controls */}
-                {isCaptain && auction.biddingOpen && (
-                  <div className="space-y-2">
-                    <p className="text-xs text-muted-foreground">
-                      Your budget left: <IndianRupee className="inline w-3 h-3" />{myTeamBudgetLeft}
-                    </p>
-                    <div className="flex gap-2">
+              {/* Captain bidding controls */}
+              {isCaptain && myTeamId && state.auction.currentBidderId !== myTeamId && (
+                <div className="mt-5 space-y-3">
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <IndianRupee className="absolute left-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground" />
                       <Input
                         type="number"
-                        placeholder={`> ₹${auction.currentBid}`}
+                        placeholder={`Min ₹${state.auction.currentBid + 1}`}
                         value={bidAmount}
                         onChange={(e) => setBidAmount(e.target.value)}
                         onKeyDown={(e) => e.key === "Enter" && handleBid()}
-                        className="flex-1"
+                        className="pl-8"
                         data-testid="input-bid-amount"
+                        min={state.auction.currentBid + 1}
+                        max={100}
                       />
-                      <Button
-                        onClick={handleBid}
-                        disabled={bidMutation.isPending}
-                        data-testid="button-place-bid"
-                      >
-                        Bid
-                      </Button>
                     </div>
-                  </div>
-                )}
-
-                {/* Admin controls */}
-                {isAdmin && (
-                  <div className="flex gap-2">
                     <Button
-                      onClick={() => sellMutation.mutate()}
-                      disabled={!auction.currentBidderId || sellMutation.isPending}
-                      className="flex-1"
-                      data-testid="button-sell"
+                      onClick={handleBid}
+                      disabled={
+                        bidMutation.isPending ||
+                        !bidAmount ||
+                        parseInt(bidAmount) <= state.auction.currentBid
+                      }
+                      data-testid="button-place-bid"
                     >
                       <Gavel className="w-4 h-4 mr-1" />
-                      Sell
-                    </Button>
-                    <Button
-                      variant="secondary"
-                      onClick={() => skipMutation.mutate()}
-                      disabled={skipMutation.isPending}
-                      data-testid="button-skip"
-                    >
-                      <SkipForward className="w-4 h-4 mr-1" />
-                      Skip
+                      Bid
                     </Button>
                   </div>
-                )}
-              </CardContent>
-            </Card>
+                  {/* Quick bid buttons */}
+                  {quickBids.length > 0 && (
+                    <div className="flex gap-2 justify-center">
+                      {quickBids.map((amt) => (
+                        <Button
+                          key={amt}
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            bidMutation.mutate({
+                              teamId: myTeamId,
+                              amount: amt,
+                            })
+                          }
+                          disabled={bidMutation.isPending}
+                          data-testid={`button-quick-bid-${amt}`}
+                        >
+                          ₹{amt}
+                        </Button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
 
-            {/* Teams panel */}
-            <div className="space-y-3">
-              {teams.map((team) => (
-                <Card key={team.id} className={myTeam?.id === team.id ? "ring-1 ring-primary" : ""}>
-                  <CardContent className="pt-4 pb-3">
-                    <div className="flex items-center justify-between mb-2">
-                      <div className="flex items-center gap-2">
-                        <div className="w-3 h-3 rounded-full" style={{ backgroundColor: team.color }} />
-                        <span className="font-semibold text-sm">{team.name}</span>
-                        {myTeam?.id === team.id && (
-                          <Badge variant="secondary" className="text-xs">You</Badge>
-                        )}
-                      </div>
-                      <div className="text-right">
-                        <p className="text-sm font-medium">
-                          <IndianRupee className="inline w-3 h-3" />{team.budget - team.spent}
-                          <span className="text-muted-foreground text-xs"> left</span>
-                        </p>
-                        <p className="text-xs text-muted-foreground">
-                          {team.players.length} players
-                        </p>
-                      </div>
-                    </div>
-                    <div className="h-1 w-full rounded-full bg-muted overflow-hidden">
-                      <div
-                        className="h-full transition-all"
-                        style={{
-                          width: `${(team.spent / team.budget) * 100}%`,
-                          backgroundColor: team.color,
-                        }}
-                      />
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          </div>
-        ) : (
-          <Card>
-            <CardContent className="py-12 text-center">
-              <Trophy className="w-12 h-12 mx-auto text-primary mb-3" />
-              <p className="text-lg font-semibold">Auction Complete!</p>
-              <Button className="mt-4" onClick={() => navigate("/results")}>
-                View Results
-              </Button>
+              {/* Captain has highest bid message */}
+              {isCaptain && myTeamId && state.auction.currentBidderId === myTeamId && (
+                <div className="mt-5 text-center">
+                  <Badge className="bg-primary/10 text-primary border-primary/20">
+                    <CheckCircle2 className="w-3.5 h-3.5 mr-1" />
+                    You have the highest bid
+                  </Badge>
+                </div>
+              )}
+
+              {/* Admin controls: Sell / Skip */}
+              {isAdmin && (
+                <div className="mt-5 flex justify-center gap-3">
+                  <Button
+                    onClick={() => sellMutation.mutate()}
+                    disabled={
+                      !state.auction.currentBidderId || sellMutation.isPending
+                    }
+                    data-testid="button-sell"
+                  >
+                    <CheckCircle2 className="w-4 h-4 mr-1" />
+                    Sold!
+                  </Button>
+                  <Button
+                    variant="outline"
+                    onClick={() => skipMutation.mutate()}
+                    disabled={skipMutation.isPending}
+                    data-testid="button-skip"
+                  >
+                    <SkipForward className="w-4 h-4 mr-1" />
+                    Unsold / Skip
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         )}
 
-        {/* Roster preview */}
-        {teams.length > 0 && (
-          <div className="grid gap-3 md:grid-cols-2">
-            {teams.map((team) => (
-              <Card key={team.id}>
+        {/* Team budgets + rosters */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          {state.teams.map((team, i) => {
+            const remaining = team.budget - team.spent;
+            const pct = team.budget > 0 ? (team.spent / team.budget) * 100 : 0;
+            const isHighBidder = state.auction.currentBidderId === team.id;
+
+            return (
+              <Card
+                key={team.id}
+                className={isHighBidder ? "ring-2 ring-primary/40 ring-offset-2 ring-offset-background" : ""}
+                data-testid={`card-team-${team.id}`}
+              >
                 <CardHeader className="pb-2">
-                  <CardTitle className="text-sm flex items-center gap-2">
-                    <div className="w-3 h-3 rounded-full" style={{ backgroundColor: team.color }} />
+                  <CardTitle className="text-sm font-semibold flex items-center gap-2">
+                    <div
+                      className="w-3 h-3 rounded-full"
+                      style={{
+                        backgroundColor: `hsl(var(--chart-${i + 1}))`,
+                      }}
+                    />
                     {team.name}
-                    <Users className="w-3 h-3 ml-auto" />
-                    {team.players.length}
+                    {isHighBidder && (
+                      <Badge variant="secondary" className="text-xs ml-1">
+                        Highest bidder
+                      </Badge>
+                    )}
+                    <Badge variant="outline" className="ml-auto font-normal text-xs">
+                      {team.players.length} bought
+                    </Badge>
                   </CardTitle>
                 </CardHeader>
-                <CardContent className="space-y-1">
+                <CardContent className="space-y-3">
+                  {/* Budget bar */}
+                  <div className="space-y-1">
+                    <div className="flex justify-between text-xs text-muted-foreground">
+                      <span>Spent: ₹{team.spent}</span>
+                      <span>Remaining: ₹{remaining}</span>
+                    </div>
+                    <div className="h-2 bg-muted rounded-full overflow-hidden">
+                      <div
+                        className="h-full rounded-full transition-all duration-500"
+                        style={{
+                          width: `${pct}%`,
+                          backgroundColor: `hsl(var(--chart-${i + 1}))`,
+                        }}
+                      />
+                    </div>
+                    <p className="text-xs text-muted-foreground text-right">
+                      Budget: ₹{team.budget}
+                    </p>
+                  </div>
+
+                  {/* Roster */}
                   {team.players.length === 0 ? (
-                    <p className="text-xs text-muted-foreground">No players yet</p>
+                    <p className="text-xs text-muted-foreground text-center py-2">
+                      No players yet
+                    </p>
                   ) : (
-                    team.players.map((p) => (
-                      <div key={p.id} className="flex justify-between text-xs">
-                        <span>{p.name}</span>
-                        <span className="text-muted-foreground">
-                          <IndianRupee className="inline w-3 h-3" />{p.soldPrice}
-                        </span>
-                      </div>
-                    ))
+                    <div className="space-y-1">
+                      {team.players.map((player, j) => (
+                        <div
+                          key={player.id}
+                          className="flex items-center justify-between text-sm py-1.5 px-2 rounded-md bg-accent/30"
+                        >
+                          <div className="flex items-center gap-2">
+                            <span className="text-xs text-muted-foreground font-mono w-4 text-right">
+                              {j + 1}.
+                            </span>
+                            <span>{player.name}</span>
+                          </div>
+                          <span className="text-xs text-muted-foreground">
+                            ₹{player.soldPrice}
+                          </span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </CardContent>
               </Card>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
       </main>
 
-      <PerplexityAttribution />
+      <footer className="border-t border-border mt-auto py-4 text-center">
+        <PerplexityAttribution />
+      </footer>
     </div>
   );
 }

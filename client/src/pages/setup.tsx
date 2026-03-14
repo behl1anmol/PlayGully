@@ -264,83 +264,54 @@ export default function SetupPage() {
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-6">
         {/* ── Teams Section ── */}
-        <Card data-testid="section-teams">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Users className="w-4 h-4" />
-              Teams ({teams.length}/2)
+        <Card data-testid="card-teams">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <Users className="w-4 h-4 text-primary" />
+              Teams &amp; Captains
+              <Badge variant="secondary" className="ml-auto font-normal">
+                {teams.length}/2
+              </Badge>
             </CardTitle>
           </CardHeader>
           <CardContent className="space-y-4">
-            {teams.length > 0 && (
-              <div className="space-y-2">
-                {teams.map((team: Team) => (
-                  <div
-                    key={team.id}
-                    className="flex items-center justify-between p-3 rounded-md border border-border bg-card"
-                  >
-                    <div className="flex items-center gap-2">
-                      <div
-                        className="w-3 h-3 rounded-full"
-                        style={{ backgroundColor: team.color }}
-                      />
-                      <span className="font-medium text-sm">{team.name}</span>
-                      <Badge variant="secondary" className="text-xs">
-                        <IndianRupee className="w-3 h-3" />
-                        {team.budget}
-                      </Badge>
-                      {team.captainUsername && (
-                        <Badge variant="outline" className="text-xs">
-                          <ShieldCheck className="w-3 h-3 mr-1" />
-                          {team.captainUsername}
-                        </Badge>
-                      )}
-                    </div>
-                    <Button
-                      variant="ghost"
-                      size="sm"
-                      onClick={() => removeTeamMutation.mutate(team.id)}
-                      data-testid={`button-remove-team-${team.id}`}
-                    >
-                      <Trash2 className="w-4 h-4" />
-                    </Button>
-                  </div>
-                ))}
-              </div>
-            )}
-
             {teams.length < 2 && (
-              <div className="space-y-2">
+              <div className="space-y-3 p-4 rounded-lg border border-dashed border-border bg-accent/20">
                 <div className="grid grid-cols-2 gap-2">
                   <Input
                     placeholder="Team name"
                     value={teamName}
                     onChange={(e) => setTeamName(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleAddTeam()}
                     data-testid="input-team-name"
                   />
-                  <Input
-                    type="number"
-                    placeholder="Budget (default 500)"
-                    value={teamBudget}
-                    onChange={(e) => setTeamBudget(e.target.value)}
-                    data-testid="input-team-budget"
-                  />
+                  <div className="relative">
+                    <IndianRupee className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                    <Input
+                      type="number"
+                      placeholder="Budget"
+                      value={teamBudget}
+                      onChange={(e) => setTeamBudget(e.target.value)}
+                      className="pl-7"
+                      data-testid="input-team-budget"
+                      min={100}
+                      max={10000}
+                    />
+                  </div>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   <Input
                     placeholder="Captain username"
                     value={captainUser}
                     onChange={(e) => setCaptainUser(e.target.value)}
-                    data-testid="input-captain-user"
+                    data-testid="input-captain-username"
+                    autoComplete="off"
                   />
                   <Input
-                    type="password"
                     placeholder="Captain password"
                     value={captainPass}
                     onChange={(e) => setCaptainPass(e.target.value)}
-                    onKeyDown={(e) => e.key === "Enter" && handleAddTeam()}
-                    data-testid="input-captain-pass"
+                    data-testid="input-captain-password"
+                    autoComplete="off"
                   />
                 </div>
                 <Button
@@ -349,103 +320,55 @@ export default function SetupPage() {
                   size="sm"
                   data-testid="button-add-team"
                 >
-                  <UserPlus className="w-4 h-4 mr-1" />
+                  <Plus className="w-4 h-4 mr-1" />
                   Add Team
                 </Button>
               </div>
             )}
-          </CardContent>
-        </Card>
 
-        {/* ── Players Section ── */}
-        <Card data-testid="section-players">
-          <CardHeader>
-            <CardTitle className="flex items-center gap-2 text-base">
-              <Users className="w-4 h-4" />
-              Player Pool ({players.length})
-            </CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            {/* Single player add */}
-            <div className="flex gap-2">
-              <Input
-                placeholder="Player name"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                onKeyDown={(e) => e.key === "Enter" && handleAddPlayer()}
-                className="flex-1"
-                data-testid="input-player-name"
-              />
-              <Input
-                type="number"
-                placeholder="Base price"
-                value={playerPrice}
-                onChange={(e) => setPlayerPrice(e.target.value)}
-                className="w-28"
-                data-testid="input-player-price"
-              />
-              <Button
-                onClick={handleAddPlayer}
-                disabled={addPlayerMutation.isPending}
-                size="sm"
-                data-testid="button-add-player"
-              >
-                <Plus className="w-4 h-4" />
-              </Button>
-            </div>
-
-            {/* Bulk add */}
-            <div className="space-y-2">
-              <p className="text-xs text-muted-foreground">Bulk add (one name per line):</p>
-              <textarea
-                className="w-full rounded-md border border-input bg-background px-3 py-2 text-sm min-h-[80px] resize-none"
-                placeholder="Player 1&#10;Player 2&#10;Player 3"
-                value={bulkText}
-                onChange={(e) => setBulkText(e.target.value)}
-                data-testid="textarea-bulk-players"
-              />
-              <div className="flex items-center gap-2">
-                <Input
-                  type="number"
-                  placeholder="Default base price (10)"
-                  value={defaultPrice}
-                  onChange={(e) => setDefaultPrice(e.target.value)}
-                  className="w-40"
-                  data-testid="input-default-price"
-                />
-                <Button
-                  onClick={handleBulkAdd}
-                  disabled={bulkAddMutation.isPending || !bulkText.trim()}
-                  size="sm"
-                  variant="secondary"
-                  data-testid="button-bulk-add"
-                >
-                  <UserPlus className="w-4 h-4 mr-1" />
-                  Bulk Add
-                </Button>
-              </div>
-            </div>
-
-            {players.length > 0 && (
-              <div className="space-y-1 max-h-48 overflow-y-auto">
-                {players.map((player: Player) => (
+            {teams.length === 0 ? (
+              <p className="text-sm text-muted-foreground py-3 text-center">
+                Add two teams with captain credentials to get started
+              </p>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                {teams.map((team: any, i: number) => (
                   <div
-                    key={player.id}
-                    className="flex items-center justify-between px-3 py-1.5 rounded border border-border text-sm"
+                    key={team.id}
+                    className="p-3 rounded-lg bg-accent/40 border border-border space-y-2"
+                    data-testid={`team-card-${team.id}`}
                   >
-                    <span>{player.name}</span>
-                    <div className="flex items-center gap-2">
-                      <Badge variant="outline" className="text-xs">
-                        <IndianRupee className="w-3 h-3" />{player.basePrice}
-                      </Badge>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div
+                          className="w-3 h-3 rounded-full"
+                          style={{
+                            backgroundColor: `hsl(var(--chart-${i + 1}))`,
+                          }}
+                        />
+                        <span className="font-semibold text-sm">
+                          {team.name}
+                        </span>
+                      </div>
                       <Button
                         variant="ghost"
                         size="sm"
-                        onClick={() => removePlayerMutation.mutate(player.id)}
-                        data-testid={`button-remove-player-${player.id}`}
+                        onClick={() => removeTeamMutation.mutate(team.id)}
+                        className="h-7 w-7 p-0 text-muted-foreground hover:text-destructive"
+                        data-testid={`button-remove-team-${team.id}`}
                       >
-                        <Trash2 className="w-3 h-3" />
+                        <Trash2 className="w-3.5 h-3.5" />
                       </Button>
+                    </div>
+                    <div className="flex items-center gap-3 text-xs text-muted-foreground">
+                      <span className="flex items-center gap-1">
+                        <IndianRupee className="w-3 h-3" />
+                        Budget: ₹{team.budget}
+                      </span>
+                      <span className="flex items-center gap-1">
+                        <ShieldCheck className="w-3 h-3" />
+                        Captain: {team.captainUsername}
+                      </span>
                     </div>
                   </div>
                 ))}
@@ -454,21 +377,149 @@ export default function SetupPage() {
           </CardContent>
         </Card>
 
-        {/* ── Start Auction \u2500─ */}
-        <div className="flex justify-end">
+        {/* ── Players Section ── */}
+        <Card data-testid="card-players">
+          <CardHeader className="pb-3">
+            <CardTitle className="text-base font-semibold flex items-center gap-2">
+              <UserPlus className="w-4 h-4 text-primary" />
+              Player Pool
+              <Badge variant="secondary" className="ml-auto font-normal">
+                {players.length} players
+              </Badge>
+            </CardTitle>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            {/* Single add */}
+            <div className="flex gap-2">
+              <Input
+                placeholder="Player name"
+                value={playerName}
+                onChange={(e) => setPlayerName(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAddPlayer()}
+                data-testid="input-player-name"
+                className="flex-1"
+              />
+              <div className="relative w-24">
+                <IndianRupee className="absolute left-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground" />
+                <Input
+                  type="number"
+                  placeholder="Price"
+                  value={playerPrice}
+                  onChange={(e) => setPlayerPrice(e.target.value)}
+                  className="pl-6"
+                  data-testid="input-player-price"
+                  min={1}
+                  max={100}
+                />
+              </div>
+              <Button
+                onClick={handleAddPlayer}
+                disabled={!playerName.trim() || addPlayerMutation.isPending}
+                size="sm"
+                data-testid="button-add-player"
+              >
+                <Plus className="w-4 h-4 mr-1" />
+                Add
+              </Button>
+            </div>
+
+            {/* Bulk add */}
+            <div className="space-y-2">
+              <label className="text-xs font-medium text-muted-foreground">
+                Add multiple players (one name per line)
+              </label>
+              <textarea
+                className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
+                placeholder={"Virat\nRohit\nDhoni\nBumrah"}
+                value={bulkText}
+                onChange={(e) => setBulkText(e.target.value)}
+                data-testid="textarea-bulk-players"
+              />
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-muted-foreground whitespace-nowrap">
+                  Default base price:
+                </label>
+                <div className="relative w-20">
+                  <IndianRupee className="absolute left-2 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground" />
+                  <Input
+                    type="number"
+                    value={defaultPrice}
+                    onChange={(e) => setDefaultPrice(e.target.value)}
+                    className="pl-5 h-8 text-xs"
+                    min={1}
+                    max={100}
+                    data-testid="input-default-price"
+                  />
+                </div>
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={handleBulkAdd}
+                  disabled={!bulkText.trim() || bulkAddMutation.isPending}
+                  data-testid="button-bulk-add"
+                >
+                  Add All
+                </Button>
+              </div>
+            </div>
+
+            {/* Player list */}
+            {players.length > 0 ? (
+              <div className="flex flex-wrap gap-2">
+                {players.map((player: any) => (
+                  <div
+                    key={player.id}
+                    className="flex items-center gap-1.5 bg-accent/50 border border-border rounded-full px-3 py-1 text-sm"
+                    data-testid={`player-chip-${player.id}`}
+                  >
+                    <span>{player.name}</span>
+                    <span className="text-xs text-muted-foreground">
+                      ₹{player.basePrice}
+                    </span>
+                    <button
+                      onClick={() => removePlayerMutation.mutate(player.id)}
+                      className="text-muted-foreground hover:text-destructive transition-colors ml-0.5"
+                      data-testid={`button-remove-player-${player.id}`}
+                    >
+                      <Trash2 className="w-3 h-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            ) : (
+              <p className="text-sm text-muted-foreground py-3 text-center">
+                No players yet. Add them above.
+              </p>
+            )}
+          </CardContent>
+        </Card>
+
+        {/* Start Auction */}
+        <div className="flex flex-col items-center gap-2 pt-2 pb-8">
           <Button
+            size="lg"
             onClick={() => startAuctionMutation.mutate()}
             disabled={!canStart || startAuctionMutation.isPending}
-            size="lg"
             data-testid="button-start-auction"
+            className="text-base px-8"
           >
             <Gavel className="w-5 h-5 mr-2" />
             Start Auction
           </Button>
+          {!canStart && (
+            <p className="text-sm text-muted-foreground text-center">
+              {teams.length < 2 ? "Add 2 teams with captain credentials" : ""}
+              {teams.length < 2 && players.length < 1 ? " and " : ""}
+              {players.length < 1 ? "Add at least 1 player" : ""}
+              {" "}to start.
+            </p>
+          )}
         </div>
       </main>
 
-      <PerplexityAttribution />
+      <footer className="border-t border-border mt-auto py-4 text-center">
+        <PerplexityAttribution />
+      </footer>
     </div>
   );
 }
