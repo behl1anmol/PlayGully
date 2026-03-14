@@ -11,12 +11,94 @@ const client = postgres(process.env.DATABASE_URL || "", {
 const db = drizzle(client, { schema });
 const INSTANT_LOCK_DURATION_SECONDS = 180;
 
+type StatusRuleForExactRequirement = {
+  validatePlayerStatusId: number;
+  description: string;
+  maxPerTeam: number | null;
+};
+
+type ExactStatusRequirement = {
+  validatePlayerStatusId: number;
+  description: string;
+  exactPerTeam: number;
+};
+
 function normalizeStatusName(statusDescription: string) {
   return statusDescription.trim().toLowerCase();
 }
 
 function toExpiryDate() {
   return new Date(Date.now() + INSTANT_LOCK_DURATION_SECONDS * 1000);
+}
+
+function findStatusRuleByNames(statusRules: StatusRuleForExactRequirement[], names: string[]) {
+  const targetNames = new Set(names.map((name) => normalizeStatusName(name)));
+  return statusRules.find((statusRule) => targetNames.has(normalizeStatusName(statusRule.description))) ?? null;
+}
+
+function getExactDiamondGoldRequirements(statusRules: StatusRuleForExactRequirement[]) {
+  const diamondRule = findStatusRuleByNames(statusRules, ["diamond", "diamin"]);
+  const goldRule = findStatusRuleByNames(statusRules, ["gold"]);
+
+  if (!diamondRule || !goldRule) {
+    throw new Error("VALIDATION:Diamond and Gold status rules must be configured");
+  }
+
+  if (diamondRule.maxPerTeam === null || goldRule.maxPerTeam === null) {
+    throw new Error("VALIDATION:Diamond and Gold limits must be configured as exact per-team values");
+  }
+
+  return [
+    {
+      validatePlayerStatusId: diamondRule.validatePlayerStatusId,
+      description: diamondRule.description,
+      exactPerTeam: diamondRule.maxPerTeam,
+    },
+    {
+      validatePlayerStatusId: goldRule.validatePlayerStatusId,
+      description: goldRule.description,
+      exactPerTeam: goldRule.maxPerTeam,
+    },
+  ] as ExactStatusRequirement[];
+}
+
+function countTeamStatusPlayers(players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>, teamId: number, statusId: number) {
+  return players.filter(
+    (player) =>
+      player.soldTo === teamId &&
+      Number(player.validatePlayerStatusId) === statusId,
+  ).length;
+}
+
+function validateTeamExactStatusFeasibility(
+  team: { id: number; name: string },
+  players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>,
+  exactRequirements: ExactStatusRequirement[],
+  maxPlayersPerTeam: number,
+) {
+  const teamPlayersCount = players.filter((player) => player.soldTo === team.id).length;
+  const remainingSlots = maxPlayersPerTeam - teamPlayersCount;
+
+  if (remainingSlots < 0) {
+    return `Rule violation: Team ${team.name} exceeds maximum allowed players (${maxPlayersPerTeam})`;
+  }
+
+  let missingRequiredPlayers = 0;
+
+  for (const requirement of exactRequirements) {
+    const statusCount = countTeamStatusPlayers(players, team.id, requirement.validatePlayerStatusId);
+    if (statusCount > requirement.exactPerTeam) {
+      return `Rule violation: Team ${team.name} cannot have more than ${requirement.exactPerTeam} ${requirement.description} players`;
+    }
+
+    missingRequiredPlayers += Math.max(0, requirement.exactPerTeam - statusCount);
+  }
+
+  if (missingRequiredPlayers > remainingSlots) {
+    return `Rule violation: Team ${team.name} must finish with exact Diamond and Gold counts. Current booking leaves too few slots to satisfy the rule.`;
+  }
+
+  return null;
 }
 
 export const storage = {
@@ -586,6 +668,29 @@ export const storage = {
       const statusRuleByStatusId = new Map(
         statusRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
       );
+
+      const exactRequirements = getExactDiamondGoldRequirements(statusRules);
+
+      const projectedPlayers = allPlayers.map((player) => {
+        if (!uniquePlayerIds.includes(player.id)) {
+          return player;
+        }
+
+        return {
+          ...player,
+          soldTo: teamId,
+        };
+      });
+
+      const exactFeasibilityError = validateTeamExactStatusFeasibility(
+        selectedTeam,
+        projectedPlayers,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (exactFeasibilityError) {
+        throw new Error(`CONFLICT:${exactFeasibilityError}`);
+      }
 
       const currentStatusCountByStatusId = new Map<number, number>();
       for (const player of soldPlayersForTeam) {

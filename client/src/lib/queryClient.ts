@@ -11,10 +11,64 @@ function isVolatileQueryPath(path: string) {
   );
 }
 
+function extractErrorMessage(payload: unknown): string | null {
+  if (typeof payload === "string") {
+    const trimmed = payload.trim();
+    return trimmed.length > 0 ? trimmed : null;
+  }
+
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+
+  const asRecord = payload as Record<string, unknown>;
+
+  if (typeof asRecord.message === "string" && asRecord.message.trim().length > 0) {
+    return asRecord.message.trim();
+  }
+
+  if (typeof asRecord.error === "string" && asRecord.error.trim().length > 0) {
+    return asRecord.error.trim();
+  }
+
+  if (Array.isArray(asRecord.errors) && asRecord.errors.length > 0) {
+    const firstError = asRecord.errors[0];
+    if (typeof firstError === "string" && firstError.trim().length > 0) {
+      return firstError.trim();
+    }
+    if (
+      firstError &&
+      typeof firstError === "object" &&
+      typeof (firstError as Record<string, unknown>).message === "string" &&
+      (firstError as Record<string, unknown>).message?.trim().length > 0
+    ) {
+      return ((firstError as Record<string, unknown>).message as string).trim();
+    }
+  }
+
+  return null;
+}
+
+function parseErrorMessageFromText(text: string): string | null {
+  const trimmed = text.trim();
+  if (trimmed.length === 0) {
+    return null;
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed);
+    return extractErrorMessage(parsed) ?? trimmed;
+  } catch {
+    return trimmed;
+  }
+}
+
 async function throwIfResNotOk(res: Response) {
   if (!res.ok) {
-    const text = (await res.text()) || res.statusText;
-    throw new Error(`${res.status}: ${text}`);
+    const text = await res.text();
+    const parsedMessage = parseErrorMessageFromText(text);
+    const fallbackMessage = res.statusText.trim().length > 0 ? res.statusText : "Request failed";
+    throw new Error(parsedMessage ?? fallbackMessage);
   }
 }
 

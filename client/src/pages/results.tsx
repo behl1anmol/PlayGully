@@ -17,6 +17,11 @@ interface FullState {
   currentPlayer: Player | null;
 }
 
+interface AuctionModeState {
+  mode: "none" | "live" | "instant";
+  phase: "setup" | "auction" | "paused" | "completed";
+}
+
 export default function ResultsPage() {
   const [, navigate] = useLocation();
   const { session, sessionRef, logout } = useAuth();
@@ -29,6 +34,11 @@ export default function ResultsPage() {
 
   const { data: state, isLoading } = useQuery<FullState>({
     queryKey: ["/api/state"],
+    refetchInterval: 3000,
+  });
+
+  const { data: auctionMode } = useQuery<AuctionModeState>({
+    queryKey: ["/api/auction-mode"],
     refetchInterval: 3000,
   });
 
@@ -52,8 +62,11 @@ export default function ResultsPage() {
 
   const isAdmin = activeSession.role === "admin";
   const isGuest = activeSession.role === "guest";
-  const isCompleted = state.auction.phase === "completed";
-  const isAuctionLive = state.auction.phase === "auction";
+  const isInstantAuctionLive = auctionMode?.mode === "instant" && auctionMode.phase === "auction";
+  const isInstantAuctionCompleted = auctionMode?.mode === "instant" && auctionMode.phase === "completed";
+  const isCompleted = state.auction.phase === "completed" || isInstantAuctionCompleted;
+  const isAuctionLive = state.auction.phase === "auction" || isInstantAuctionLive;
+  const isAuctionNotStarted = !isAuctionLive && !isCompleted && state.auction.phase === "setup";
   const unsoldPlayers = state.players.filter(
     (p) => !p.teamId && state.auction.phase === "completed"
   );
@@ -149,14 +162,18 @@ export default function ResultsPage() {
         {isAuctionLive && (
           <div className="rounded-xl p-5 text-center bg-chart-4/10 border border-chart-4/20">
             <Gavel className="w-8 h-8 mx-auto text-chart-4 mb-2" />
-            <h2 className="text-lg font-bold">Auction In Progress</h2>
+            <h2 className="text-lg font-bold">
+              {isInstantAuctionLive ? "Instant Auction In Progress" : "Auction In Progress"}
+            </h2>
             <p className="text-sm text-muted-foreground mt-1">
-              Teams are being built live. Check back for final results.
+              {isInstantAuctionLive
+                ? "Captains are locking and booking players live. Check back for final results."
+                : "Teams are being built live. Check back for final results."}
             </p>
           </div>
         )}
 
-        {state.auction.phase === "setup" && (
+        {isAuctionNotStarted && (
           <div className="rounded-xl p-5 text-center bg-muted border border-border">
             <Gavel className="w-8 h-8 mx-auto text-muted-foreground mb-2" />
             <h2 className="text-lg font-bold">Auction Not Started</h2>

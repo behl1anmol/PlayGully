@@ -7,6 +7,7 @@ import { useToast } from "@/hooks/use-toast";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import {
   CheckCircle2,
   Gavel,
@@ -39,6 +40,13 @@ interface InstantState {
   };
 }
 
+interface PlayerStatusRule {
+  validatePlayerStatusId: number;
+  description: string;
+  basePrice: number;
+  maxPerTeam: number | null;
+}
+
 function formatRemainingTime(expiresAt: string) {
   const remainingMs = new Date(expiresAt).getTime() - Date.now();
   const remainingSeconds = Math.max(0, Math.floor(remainingMs / 1000));
@@ -69,6 +77,11 @@ export default function InstantAuctionPage() {
     queryKey: ["/api/instant-auction/state"],
     enabled: isAllowedRole,
     refetchInterval: isAllowedRole ? 1500 : false,
+  });
+
+  const { data: playerStatusRules = [] } = useQuery<PlayerStatusRule[]>({
+    queryKey: ["/api/player-statuses"],
+    enabled: isAllowedRole,
   });
 
   useEffect(() => {
@@ -224,9 +237,30 @@ export default function InstantAuctionPage() {
     return lock && lock.teamId === myTeamId;
   });
 
+  const myTeam = Number.isInteger(myTeamId)
+    ? state.teams.find((team) => team.id === Number(myTeamId)) ?? null
+    : null;
+  const captainRemainingBudget = myTeam ? (myTeam.budget ?? 0) - (myTeam.spent ?? 0) : 0;
+
+  const availablePlayerById = new Map(state.availablePlayers.map((player) => [player.id, player]));
+  const selectedLockedTotal = selectedLockedPlayerIds.reduce((sum, playerId) => {
+    const player = availablePlayerById.get(playerId);
+    return sum + (player?.basePrice ?? 0);
+  }, 0);
+  const remainingAfterSelectedBooking = captainRemainingBudget - selectedLockedTotal;
+  const wouldBeNegativeBalance = remainingAfterSelectedBooking < 0;
+
   const soldPlayerIds = new Set(
     state.players.filter((player) => player.teamId != null).map((player) => player.id),
   );
+
+  const findStatusRule = (statusNames: string[]) => {
+    const normalizedStatusNames = new Set(statusNames.map((statusName) => statusName.trim().toLowerCase()));
+    return playerStatusRules.find((statusRule) => normalizedStatusNames.has(statusRule.description.trim().toLowerCase())) ?? null;
+  };
+
+  const diamondRule = findStatusRule(["diamond", "diamin"]);
+  const goldRule = findStatusRule(["gold"]);
 
   const sortedPoolPlayers = [...state.availablePlayers].sort((firstPlayer, secondPlayer) =>
     firstPlayer.name.localeCompare(secondPlayer.name),
@@ -245,6 +279,23 @@ export default function InstantAuctionPage() {
       }
       return [...previousSelection, playerId];
     });
+  };
+
+  const handleBookSelected = () => {
+    if (selectedLockedPlayerIds.length === 0 || bookMutation.isPending) {
+      return;
+    }
+
+    if (wouldBeNegativeBalance) {
+      toast({
+        title: "Booking failed",
+        description: "Booking would make remaining amount negative. Remove players and try again.",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    bookMutation.mutate(selectedLockedPlayerIds);
   };
 
   return (
@@ -297,6 +348,28 @@ export default function InstantAuctionPage() {
 
       <main className="max-w-6xl mx-auto w-full px-4 py-6 space-y-6 flex-1">
         <Card>
+          <CardContent className="py-2">
+            <Accordion type="single" collapsible>
+              <AccordionItem value="instant-auction-rules" className="border-b-0">
+                <AccordionTrigger className="py-3 text-sm font-semibold">
+                  Auction Rules
+                </AccordionTrigger>
+                <AccordionContent>
+                  <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground">
+                    <li>Each lock is exclusive to one captain and expires in {state.lockDurationSeconds} seconds.</li>
+                    <li>Only players locked by your team can be booked.</li>
+                    <li>Each team can buy at most {state.settings?.maxPlayersPerTeam ?? 11} players.</li>
+                    <li>Each team must finish with exactly {diamondRule?.maxPerTeam ?? "-"} Diamond players.</li>
+                    <li>Each team must finish with exactly {goldRule?.maxPerTeam ?? "-"} Gold players.</li>
+                    <li>Instant auction cannot be stopped until all teams satisfy exact Diamond/Gold counts.</li>
+                  </ul>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          </CardContent>
+        </Card>
+
+        <Card>
           <CardHeader className="pb-3">
             <CardTitle className="text-base font-semibold flex items-center gap-2">
               <Lock className="w-4 h-4 text-primary" />
@@ -308,36 +381,57 @@ export default function InstantAuctionPage() {
           </CardHeader>
           <CardContent className="space-y-3">
             {isCaptain && (
-              <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  size="sm"
-                  onClick={() => lockMutation.mutate(selectedPlayerIds)}
-                  disabled={selectedPlayerIds.length === 0 || lockMutation.isPending}
-                  data-testid="button-lock-selected"
-                >
-                  <Lock className="w-4 h-4 mr-1" />
-                  Lock Selected ({selectedPlayerIds.length})
-                </Button>
-                <Button
-                  size="sm"
-                  variant="outline"
-                  onClick={() => bookMutation.mutate(selectedLockedPlayerIds)}
-                  disabled={selectedLockedPlayerIds.length === 0 || bookMutation.isPending}
-                  data-testid="button-book-selected"
-                >
-                  <CheckCircle2 className="w-4 h-4 mr-1" />
-                  Book Locked ({selectedLockedPlayerIds.length})
-                </Button>
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  onClick={() => unlockMutation.mutate(selectedLockedPlayerIds)}
-                  disabled={selectedLockedPlayerIds.length === 0 || unlockMutation.isPending}
-                  data-testid="button-unlock-selected"
-                >
-                  <Unlock className="w-4 h-4 mr-1" />
-                  Unlock Selected
-                </Button>
+              <div className="space-y-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Button
+                    size="sm"
+                    onClick={() => lockMutation.mutate(selectedPlayerIds)}
+                    disabled={selectedPlayerIds.length === 0 || lockMutation.isPending}
+                    data-testid="button-lock-selected"
+                  >
+                    <Lock className="w-4 h-4 mr-1" />
+                    Lock Selected ({selectedPlayerIds.length})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    onClick={handleBookSelected}
+                    disabled={selectedLockedPlayerIds.length === 0 || bookMutation.isPending || wouldBeNegativeBalance}
+                    data-testid="button-book-selected"
+                  >
+                    <CheckCircle2 className="w-4 h-4 mr-1" />
+                    Book Locked ({selectedLockedPlayerIds.length})
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="ghost"
+                    onClick={() => unlockMutation.mutate(selectedLockedPlayerIds)}
+                    disabled={selectedLockedPlayerIds.length === 0 || unlockMutation.isPending}
+                    data-testid="button-unlock-selected"
+                  >
+                    <Unlock className="w-4 h-4 mr-1" />
+                    Unlock Selected
+                  </Button>
+                </div>
+
+                <div className="rounded-md border border-border bg-muted/40 px-3 py-2">
+                  <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-muted-foreground">
+                    <span data-testid="text-current-remaining-budget">Current remaining: ₹{captainRemainingBudget}</span>
+                    <span data-testid="text-selected-locked-total">Selected locked total: ₹{selectedLockedTotal}</span>
+                    <span
+                      data-testid="text-remaining-after-booking"
+                      className={wouldBeNegativeBalance ? "font-medium text-destructive" : "font-medium"}
+                    >
+                      Remaining after booking: ₹{remainingAfterSelectedBooking >= 0 ? "+" : ""}
+                      {remainingAfterSelectedBooking}
+                    </span>
+                  </div>
+                  {wouldBeNegativeBalance && selectedLockedPlayerIds.length > 0 && (
+                    <p className="mt-1 text-xs text-destructive">
+                      Booking is blocked because remaining amount would become negative.
+                    </p>
+                  )}
+                </div>
               </div>
             )}
 

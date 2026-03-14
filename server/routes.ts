@@ -160,6 +160,147 @@ function mapStorageError(error: unknown, defaultMessage: string) {
   return { status: 500, message: defaultMessage };
 }
 
+type ExactStatusRequirement = {
+  validatePlayerStatusId: number;
+  description: string;
+  exactPerTeam: number;
+};
+
+function getExactDiamondGoldRequirements(statusRules: PlayerStatusRule[]) {
+  const diamondRule = findStatusRuleByNames(statusRules, ["diamond", "diamin"]);
+  const goldRule = findStatusRuleByNames(statusRules, ["gold"]);
+
+  if (!diamondRule || !goldRule) {
+    throw new Error("Diamond and Gold status rules must be configured");
+  }
+
+  if (diamondRule.maxPerTeam === null || goldRule.maxPerTeam === null) {
+    throw new Error("Diamond and Gold limits must be configured as exact per-team values");
+  }
+
+  return [
+    {
+      validatePlayerStatusId: diamondRule.validatePlayerStatusId,
+      description: diamondRule.description,
+      exactPerTeam: diamondRule.maxPerTeam,
+    },
+    {
+      validatePlayerStatusId: goldRule.validatePlayerStatusId,
+      description: goldRule.description,
+      exactPerTeam: goldRule.maxPerTeam,
+    },
+  ] as ExactStatusRequirement[];
+}
+
+function countTeamStatusPlayers(players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>, teamId: number, statusId: number) {
+  return players.filter(
+    (player) => player.soldTo === teamId && Number(player.validatePlayerStatusId) === statusId,
+  ).length;
+}
+
+function validateTeamsCanStillMeetExactRequirements(
+  teams: Array<{ id: number; name: string }>,
+  players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>,
+  exactRequirements: ExactStatusRequirement[],
+  maxPlayersPerTeam: number,
+) {
+  for (const team of teams) {
+    const soldPlayersCount = players.filter((player) => player.soldTo === team.id).length;
+    const remainingSlots = maxPlayersPerTeam - soldPlayersCount;
+    if (remainingSlots < 0) {
+      return `Rule violation: Team ${team.name} exceeds maximum allowed players (${maxPlayersPerTeam})`;
+    }
+
+    let missingRequiredPlayers = 0;
+
+    for (const requirement of exactRequirements) {
+      const statusCount = countTeamStatusPlayers(players, team.id, requirement.validatePlayerStatusId);
+      if (statusCount > requirement.exactPerTeam) {
+        return `Rule violation: Team ${team.name} cannot have more than ${requirement.exactPerTeam} ${requirement.description} players`;
+      }
+
+      missingRequiredPlayers += Math.max(0, requirement.exactPerTeam - statusCount);
+    }
+
+    if (missingRequiredPlayers > remainingSlots) {
+      return `Rule violation: Team ${team.name} must finish with exact Diamond and Gold counts. Current state leaves too few slots.`;
+    }
+  }
+
+  return null;
+}
+
+function validateTeamsMeetExactRequirements(
+  teams: Array<{ id: number; name: string }>,
+  players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>,
+  exactRequirements: ExactStatusRequirement[],
+) {
+  for (const team of teams) {
+    for (const requirement of exactRequirements) {
+      const statusCount = countTeamStatusPlayers(players, team.id, requirement.validatePlayerStatusId);
+      if (statusCount !== requirement.exactPerTeam) {
+        return `Rule violation: Team ${team.name} must have exactly ${requirement.exactPerTeam} ${requirement.description} players`;
+      }
+    }
+  }
+
+  return null;
+}
+
+function validateAvailablePoolSupplyForExactRequirements(
+  teams: Array<{ id: number; name: string }>,
+  players: Array<{ soldTo: number | null; validatePlayerStatusId: number | null }>,
+  exactRequirements: ExactStatusRequirement[],
+) {
+  for (const requirement of exactRequirements) {
+    const remainingRequiredAcrossTeams = teams.reduce((sum, team) => {
+      const statusCount = countTeamStatusPlayers(players, team.id, requirement.validatePlayerStatusId);
+      return sum + Math.max(0, requirement.exactPerTeam - statusCount);
+    }, 0);
+
+    const availablePlayersCount = players.filter(
+      (player) =>
+        player.soldTo === null &&
+        Number(player.validatePlayerStatusId) === requirement.validatePlayerStatusId,
+    ).length;
+
+    if (availablePlayersCount < remainingRequiredAcrossTeams) {
+      return `Rule violation: Not enough available ${requirement.description} players to satisfy exact team requirements.`;
+    }
+  }
+
+  return null;
+}
+
+function validateRemainingQueueSupplyForExactRequirements(
+  teams: Array<{ id: number; name: string }>,
+  projectedPlayers: Array<{ id: number; soldTo: number | null; validatePlayerStatusId: number | null }>,
+  exactRequirements: ExactStatusRequirement[],
+  remainingQueuePlayerIds: number[],
+) {
+  const projectedPlayerById = new Map(projectedPlayers.map((player) => [player.id, player]));
+
+  for (const requirement of exactRequirements) {
+    const remainingRequiredAcrossTeams = teams.reduce((sum, team) => {
+      const statusCount = countTeamStatusPlayers(projectedPlayers, team.id, requirement.validatePlayerStatusId);
+      return sum + Math.max(0, requirement.exactPerTeam - statusCount);
+    }, 0);
+
+    const remainingQueueSupply = remainingQueuePlayerIds.reduce((count, playerId) => {
+      const player = projectedPlayerById.get(playerId);
+      if (!player || player.soldTo !== null) return count;
+
+      return Number(player.validatePlayerStatusId) === requirement.validatePlayerStatusId ? count + 1 : count;
+    }, 0);
+
+    if (remainingQueueSupply < remainingRequiredAcrossTeams) {
+      return `Rule violation: Remaining live-auction queue does not have enough ${requirement.description} players to satisfy exact team requirements.`;
+    }
+  }
+
+  return null;
+}
+
 function toStatusMap(playerStatuses: Array<{ validatePlayerStatusId: number; description: string }>) {
   return Object.fromEntries(
     playerStatuses.map((playerStatus) => [playerStatus.validatePlayerStatusId, playerStatus.description]),
@@ -821,6 +962,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Stop Instant Auction before starting Live Auction" });
       }
 
+      const [teams, players, statusRules, setup] = await Promise.all([
+        storage.getTeams(),
+        storage.getPlayers(),
+        storage.getPlayerStatusRules(),
+        storage.getSetup(),
+      ]);
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const supplyValidationMessage = validateAvailablePoolSupplyForExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+      );
+      if (supplyValidationMessage) {
+        return res.status(400).json({ message: supplyValidationMessage });
+      }
+
       await storage.startAuction();
       const uiState = await getUiState();
       res.json(uiState.auction);
@@ -841,6 +1016,40 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Live Auction is active. Stop it before starting Instant Auction." });
       }
 
+      const [teams, players, statusRules, setup] = await Promise.all([
+        storage.getTeams(),
+        storage.getPlayers(),
+        storage.getPlayerStatusRules(),
+        storage.getSetup(),
+      ]);
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const supplyValidationMessage = validateAvailablePoolSupplyForExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+      );
+      if (supplyValidationMessage) {
+        return res.status(400).json({ message: supplyValidationMessage });
+      }
+
       await storage.startInstantAuction();
       const instantUiState = await getInstantUiState();
       res.json(instantUiState);
@@ -854,6 +1063,28 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const session = getSessionFromRequest(req);
       if (!session || session.role !== "admin") {
         return res.status(401).json({ message: "Admin authentication required" });
+      }
+
+      const [teams, players, statusRules] = await Promise.all([
+        storage.getTeams(),
+        storage.getPlayers(),
+        storage.getPlayerStatusRules(),
+      ]);
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const exactCompletionMessage = validateTeamsMeetExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+      );
+      if (exactCompletionMessage) {
+        return res.status(400).json({ message: exactCompletionMessage });
       }
 
       await storage.stopInstantAuction();
@@ -1012,9 +1243,46 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/next", async (req, res) => {
     try {
-      const auctionState = await storage.getAuctionState();
+      const [auctionState, players, teams, statusRules, setup] = await Promise.all([
+        storage.getAuctionState(),
+        storage.getPlayers(),
+        storage.getTeams(),
+        storage.getPlayerStatusRules(),
+        storage.getSetup(),
+      ]);
+
       if (!auctionState || auctionState.status !== "active") {
         return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const nextQueueIndex = (auctionState.currentPlayerIndex ?? 0) + 1;
+      const remainingQueuePlayerIds = (auctionState.playerQueue ?? []).slice(nextQueueIndex);
+      const remainingQueueSupplyMessage = validateRemainingQueueSupplyForExactRequirements(
+        teams,
+        players,
+        exactRequirements,
+        remainingQueuePlayerIds,
+      );
+      if (remainingQueueSupplyMessage) {
+        return res.status(400).json({ message: remainingQueueSupplyMessage });
       }
 
       await storage.nextPlayer();
@@ -1132,6 +1400,48 @@ export async function registerRoutes(app: Express): Promise<Server> {
         }
       }
 
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const projectedPlayersAfterSell = players.map((player) => {
+        if (player.id !== currentPlayer.id) {
+          return player;
+        }
+
+        return {
+          ...player,
+          soldTo: auctionState.currentBidTeamId,
+          soldAmount: auctionState.currentBid,
+          status: "sold",
+        };
+      });
+
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        projectedPlayersAfterSell,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const nextQueueIndex = (auctionState.currentPlayerIndex ?? 0) + 1;
+      const remainingQueuePlayerIds = (auctionState.playerQueue ?? []).slice(nextQueueIndex);
+      const remainingQueueSupplyMessage = validateRemainingQueueSupplyForExactRequirements(
+        teams,
+        projectedPlayersAfterSell,
+        exactRequirements,
+        remainingQueuePlayerIds,
+      );
+      if (remainingQueueSupplyMessage) {
+        return res.status(400).json({ message: remainingQueueSupplyMessage });
+      }
+
       await storage.sellPlayer();
       const uiState = await getUiState();
       res.json({ state: uiState.auction });
@@ -1142,9 +1452,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/unsold", async (req, res) => {
     try {
-      const auctionState = await storage.getAuctionState();
+      const [auctionState, players, teams, statusRules, setup] = await Promise.all([
+        storage.getAuctionState(),
+        storage.getPlayers(),
+        storage.getTeams(),
+        storage.getPlayerStatusRules(),
+        storage.getSetup(),
+      ]);
+
       if (!auctionState || auctionState.status !== "active") {
         return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      if (!auctionState.currentPlayerId) {
+        return res.status(400).json({ message: "No current player" });
+      }
+
+      const currentPlayer = players.find((player) => player.id === auctionState.currentPlayerId);
+      if (!currentPlayer) {
+        return res.status(404).json({ message: "Current player not found" });
+      }
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const projectedPlayersAfterUnsold = players.map((player) => {
+        if (player.id !== currentPlayer.id) {
+          return player;
+        }
+
+        return {
+          ...player,
+          soldTo: null,
+          soldAmount: null,
+          status: "unsold",
+        };
+      });
+
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        projectedPlayersAfterUnsold,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const nextQueueIndex = (auctionState.currentPlayerIndex ?? 0) + 1;
+      const remainingQueuePlayerIds = (auctionState.playerQueue ?? []).slice(nextQueueIndex);
+      const remainingQueueSupplyMessage = validateRemainingQueueSupplyForExactRequirements(
+        teams,
+        projectedPlayersAfterUnsold,
+        exactRequirements,
+        remainingQueuePlayerIds,
+      );
+      if (remainingQueueSupplyMessage) {
+        return res.status(400).json({ message: remainingQueueSupplyMessage });
       }
 
       await storage.markPlayerUnsold();
@@ -1157,9 +1526,68 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post("/api/auction/skip", async (req, res) => {
     try {
-      const auctionState = await storage.getAuctionState();
+      const [auctionState, players, teams, statusRules, setup] = await Promise.all([
+        storage.getAuctionState(),
+        storage.getPlayers(),
+        storage.getTeams(),
+        storage.getPlayerStatusRules(),
+        storage.getSetup(),
+      ]);
+
       if (!auctionState || auctionState.status !== "active") {
         return res.status(400).json({ message: "Auction is not active" });
+      }
+
+      if (!auctionState.currentPlayerId) {
+        return res.status(400).json({ message: "No current player" });
+      }
+
+      const currentPlayer = players.find((player) => player.id === auctionState.currentPlayerId);
+      if (!currentPlayer) {
+        return res.status(404).json({ message: "Current player not found" });
+      }
+
+      let exactRequirements: ExactStatusRequirement[];
+      try {
+        exactRequirements = getExactDiamondGoldRequirements(statusRules);
+      } catch (error) {
+        return res.status(400).json({ message: (error as Error).message });
+      }
+
+      const maxPlayersPerTeam = setup?.maxPlayersPerTeam ?? 11;
+      const projectedPlayersAfterSkip = players.map((player) => {
+        if (player.id !== currentPlayer.id) {
+          return player;
+        }
+
+        return {
+          ...player,
+          soldTo: null,
+          soldAmount: null,
+          status: "unsold",
+        };
+      });
+
+      const teamFeasibilityMessage = validateTeamsCanStillMeetExactRequirements(
+        teams,
+        projectedPlayersAfterSkip,
+        exactRequirements,
+        maxPlayersPerTeam,
+      );
+      if (teamFeasibilityMessage) {
+        return res.status(400).json({ message: teamFeasibilityMessage });
+      }
+
+      const nextQueueIndex = (auctionState.currentPlayerIndex ?? 0) + 1;
+      const remainingQueuePlayerIds = (auctionState.playerQueue ?? []).slice(nextQueueIndex);
+      const remainingQueueSupplyMessage = validateRemainingQueueSupplyForExactRequirements(
+        teams,
+        projectedPlayersAfterSkip,
+        exactRequirements,
+        remainingQueuePlayerIds,
+      );
+      if (remainingQueueSupplyMessage) {
+        return res.status(400).json({ message: remainingQueueSupplyMessage });
       }
 
       await storage.markPlayerUnsold();

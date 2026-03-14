@@ -5,6 +5,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Accordion, AccordionContent, AccordionItem, AccordionTrigger } from "@/components/ui/accordion";
 import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
 import { useAuth } from "@/lib/auth";
@@ -34,6 +35,13 @@ interface FullState {
   currentPlayer: Player | null;
 }
 
+interface PlayerStatusRule {
+  validatePlayerStatusId: number;
+  description: string;
+  basePrice: number;
+  maxPerTeam: number | null;
+}
+
 export default function AuctionPage() {
   const [bidAmount, setBidAmount] = useState("");
   const { toast } = useToast();
@@ -49,6 +57,10 @@ export default function AuctionPage() {
   const { data: state, isLoading } = useQuery<FullState>({
     queryKey: ["/api/state"],
     refetchInterval: 1500,
+  });
+
+  const { data: playerStatusRules = [] } = useQuery<PlayerStatusRule[]>({
+    queryKey: ["/api/player-statuses"],
   });
 
   const bidMutation = useMutation({
@@ -240,6 +252,14 @@ export default function AuctionPage() {
       ].filter((b) => b <= 100 && (myTeam ? b <= myTeam.budget - myTeam.spent : true))
     : [];
 
+  const findStatusRule = (statusNames: string[]) => {
+    const normalizedStatusNames = new Set(statusNames.map((statusName) => statusName.trim().toLowerCase()));
+    return playerStatusRules.find((statusRule) => normalizedStatusNames.has(statusRule.description.trim().toLowerCase())) ?? null;
+  };
+
+  const diamondRule = findStatusRule(["diamond", "diamin"]);
+  const goldRule = findStatusRule(["gold"]);
+
   return (
     <div className="min-h-screen bg-background">
       {/* Header */}
@@ -291,6 +311,27 @@ export default function AuctionPage() {
       </header>
 
       <main className="max-w-5xl mx-auto px-4 py-6 space-y-5">
+        <Card>
+          <CardContent className="py-2">
+            <Accordion type="single" collapsible>
+              <AccordionItem value="live-auction-rules" className="border-b-0">
+                <AccordionTrigger className="py-3 text-sm font-semibold">
+                  Auction Rules
+                </AccordionTrigger>
+                <AccordionContent>
+                  <ul className="list-disc pl-5 space-y-1 text-sm text-muted-foreground">
+                    <li>Each team can buy at most {state.settings?.maxPlayersPerTeam ?? 11} players.</li>
+                    <li>Each team must finish with exactly {diamondRule?.maxPerTeam ?? "-"} Diamond players.</li>
+                    <li>Each team must finish with exactly {goldRule?.maxPerTeam ?? "-"} Gold players.</li>
+                    <li>Silver and Bronze player prices are player-specific and enforced at add/edit time.</li>
+                    <li>Auction cannot progress via sell/skip if it makes exact Diamond/Gold composition impossible.</li>
+                  </ul>
+                </AccordionContent>
+              </AccordionItem>
+            </Accordion>
+          </CardContent>
+        </Card>
+
         {isPaused && (
           <div className="rounded-xl p-4 text-center bg-muted border border-border">
             <h2 className="text-base font-semibold">Auction Paused</h2>
