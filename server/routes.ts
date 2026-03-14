@@ -16,6 +16,20 @@ function normalizeStatusName(statusDescription: string) {
   return statusDescription.trim().toLowerCase();
 }
 
+function requiresManualPlayerPrice(statusDescription: string) {
+  const normalizedStatusDescription = normalizeStatusName(statusDescription);
+  return normalizedStatusDescription === "silver" || normalizedStatusDescription === "bronze";
+}
+
+function parsePositiveWholeNumber(value: unknown) {
+  const parsedValue = Number(value);
+  if (!Number.isInteger(parsedValue) || parsedValue <= 0) {
+    return null;
+  }
+
+  return parsedValue;
+}
+
 function findStatusRuleByNames(statusRules: PlayerStatusRule[], names: string[]) {
   const targetNames = new Set(names.map((name) => normalizeStatusName(name)));
   return statusRules.find((statusRule) => targetNames.has(normalizeStatusName(statusRule.description))) ?? null;
@@ -205,11 +219,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const diamondRule = findStatusRuleByNames(currentRules, ["diamond", "diamin"]);
       const goldRule = findStatusRuleByNames(currentRules, ["gold"]);
-      const silverRule = findStatusRuleByNames(currentRules, ["silver"]);
-      const bronzeRule = findStatusRuleByNames(currentRules, ["bronze"]);
       const eliteRule = findStatusRuleByNames(currentRules, ["elite"]);
 
-      if (!diamondRule || !goldRule || !silverRule || !bronzeRule || !eliteRule) {
+      if (!diamondRule || !goldRule || !eliteRule) {
         return res.status(500).json({ message: "Required player statuses are not configured" });
       }
 
@@ -218,18 +230,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const diamondPrice = Number(prices.diamond ?? diamondRule.basePrice);
       const goldPrice = Number(prices.gold ?? goldRule.basePrice);
-      const silverPrice = Number(prices.silver ?? silverRule.basePrice);
-      const bronzePrice = Number(prices.bronze ?? bronzeRule.basePrice);
 
-      const configuredPrices = [diamondPrice, goldPrice, silverPrice, bronzePrice];
+      const configuredPrices = [diamondPrice, goldPrice];
       const hasInvalidPrice = configuredPrices.some((price) => !Number.isInteger(price) || price <= 0);
       if (hasInvalidPrice) {
-        return res.status(400).json({ message: "All status prices must be positive whole numbers" });
+        return res.status(400).json({ message: "Diamond and Gold prices must be positive whole numbers" });
       }
 
-      if (!(diamondPrice > goldPrice && goldPrice > silverPrice && silverPrice > bronzePrice)) {
+      if (!(diamondPrice > goldPrice)) {
         return res.status(400).json({
-          message: "Price order must be Diamond > Gold > Silver > Bronze",
+          message: "Price order must be Diamond > Gold",
         });
       }
 
@@ -253,14 +263,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
           validatePlayerStatusId: goldRule.validatePlayerStatusId,
           basePrice: goldPrice,
           maxPerTeam: goldLimit,
-        },
-        {
-          validatePlayerStatusId: silverRule.validatePlayerStatusId,
-          basePrice: silverPrice,
-        },
-        {
-          validatePlayerStatusId: bronzeRule.validatePlayerStatusId,
-          basePrice: bronzePrice,
         },
         {
           validatePlayerStatusId: eliteRule.validatePlayerStatusId,
@@ -308,10 +310,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return res.status(400).json({ message: "Elite status is reserved for team captains" });
       }
 
+      let basePrice = selectedStatusRule.basePrice;
+      if (requiresManualPlayerPrice(selectedStatusRule.description)) {
+        const parsedBasePrice = parsePositiveWholeNumber(req.body.basePrice);
+        if (parsedBasePrice === null) {
+          return res.status(400).json({
+            message: "Base price is required for Silver and Bronze players and must be a whole number > 0",
+          });
+        }
+        basePrice = parsedBasePrice;
+      }
+
       const playerData = insertPlayerSchema.parse({
         ...req.body,
         role: req.body.role ?? "player",
-        basePrice: selectedStatusRule.basePrice,
+        basePrice,
         validatePlayerStatusId,
       });
 
@@ -355,10 +368,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
           return res.status(400).json({ message: "Elite status is reserved for team captains" });
         }
 
+        let basePrice = selectedStatusRule.basePrice;
+        if (requiresManualPlayerPrice(selectedStatusRule.description)) {
+          const parsedBasePrice = parsePositiveWholeNumber(player.basePrice);
+          if (parsedBasePrice === null) {
+            return res.status(400).json({
+              message: "Each Silver/Bronze player must include a basePrice as a whole number > 0",
+            });
+          }
+          basePrice = parsedBasePrice;
+        }
+
         const playerData = insertPlayerSchema.parse({
           ...player,
           role: player.role ?? "player",
-          basePrice: selectedStatusRule.basePrice,
+          basePrice,
           validatePlayerStatusId,
         });
         const inserted = await storage.createPlayer(playerData);
@@ -378,26 +402,52 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const id = parseInt(req.params.id);
       const updates = { ...req.body };
+      const existingPlayer = (await storage.getPlayers()).find((player) => player.id === id);
+      if (!existingPlayer) {
+        return res.status(404).json({ message: "Player not found" });
+      }
 
-      if (updates.validatePlayerStatusId !== undefined) {
-        const validatePlayerStatusId = Number(updates.validatePlayerStatusId);
-        if (!Number.isInteger(validatePlayerStatusId)) {
-          return res.status(400).json({ message: "Invalid player status" });
+      const statusRules = await storage.getPlayerStatusRules();
+      const statusRuleByStatusId = new Map(
+        statusRules.map((statusRule) => [statusRule.validatePlayerStatusId, statusRule]),
+      );
+
+      const isStatusChanged = updates.validatePlayerStatusId !== undefined;
+      const targetStatusId = isStatusChanged
+        ? Number(updates.validatePlayerStatusId)
+        : existingPlayer.validatePlayerStatusId;
+
+      if (!Number.isInteger(targetStatusId)) {
+        return res.status(400).json({ message: "Invalid player status" });
+      }
+
+      const normalizedTargetStatusId = Number(targetStatusId);
+
+      const selectedStatusRule = statusRuleByStatusId.get(normalizedTargetStatusId);
+      if (!selectedStatusRule) {
+        return res.status(400).json({ message: "Invalid player status" });
+      }
+
+      if (normalizeStatusName(selectedStatusRule.description) === "elite") {
+        return res.status(400).json({ message: "Elite status is reserved for team captains" });
+      }
+
+      if (requiresManualPlayerPrice(selectedStatusRule.description)) {
+        if (isStatusChanged || updates.basePrice !== undefined) {
+          const parsedBasePrice = parsePositiveWholeNumber(updates.basePrice);
+          if (parsedBasePrice === null) {
+            return res.status(400).json({
+              message: "Base price is required for Silver and Bronze players and must be a whole number > 0",
+            });
+          }
+          updates.basePrice = parsedBasePrice;
         }
-
-        const statusRules = await storage.getPlayerStatusRules();
-        const selectedStatusRule = statusRules.find(
-          (statusRule) => statusRule.validatePlayerStatusId === validatePlayerStatusId,
-        );
-        if (!selectedStatusRule) {
-          return res.status(400).json({ message: "Invalid player status" });
-        }
-
-        if (normalizeStatusName(selectedStatusRule.description) === "elite") {
-          return res.status(400).json({ message: "Elite status is reserved for team captains" });
-        }
-
+      } else {
         updates.basePrice = selectedStatusRule.basePrice;
+      }
+
+      if (isStatusChanged) {
+        updates.validatePlayerStatusId = normalizedTargetStatusId;
       }
 
       const player = await storage.updatePlayer(id, updates);

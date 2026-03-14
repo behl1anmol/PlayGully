@@ -49,8 +49,8 @@ export const storage = {
       const defaultStatusRuleByStatusId: Record<number, { basePrice: number; maxPerTeam: number | null }> = {
         1: { basePrice: 100, maxPerTeam: 1 },
         2: { basePrice: 70, maxPerTeam: 2 },
-        3: { basePrice: 40, maxPerTeam: null },
-        4: { basePrice: 20, maxPerTeam: null },
+        3: { basePrice: 0, maxPerTeam: null },
+        4: { basePrice: 0, maxPerTeam: null },
         5: { basePrice: 0, maxPerTeam: 1 },
       };
 
@@ -70,6 +70,17 @@ export const storage = {
             basePrice: defaultRule.basePrice,
             maxPerTeam: defaultRule.maxPerTeam,
           });
+          continue;
+        }
+
+        if (
+          (status.validatePlayerStatusId === 3 || status.validatePlayerStatusId === 4) &&
+          existingRule.basePrice !== 0
+        ) {
+          await db
+            .update(schema.playerStatusRules)
+            .set({ basePrice: 0 })
+            .where(eq(schema.playerStatusRules.validatePlayerStatusId, status.validatePlayerStatusId));
         }
       }
 

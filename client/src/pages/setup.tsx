@@ -36,6 +36,11 @@ interface PlayerStatus {
   maxPerTeam: number | null;
 }
 
+function requiresManualPlayerPrice(statusDescription?: string | null) {
+  const normalizedStatusDescription = statusDescription?.trim().toLowerCase();
+  return normalizedStatusDescription === "silver" || normalizedStatusDescription === "bronze";
+}
+
 export default function SetupPage() {
   const [teamName, setTeamName] = useState("");
   const [teamBudget, setTeamBudget] = useState("500");
@@ -43,10 +48,11 @@ export default function SetupPage() {
   const [captainPass, setCaptainPass] = useState("");
   const [playerName, setPlayerName] = useState("");
   const [playerStatusId, setPlayerStatusId] = useState("");
+  const [manualPlayerPrice, setManualPlayerPrice] = useState("");
   const [bulkText, setBulkText] = useState("");
   const [defaultStatusId, setDefaultStatusId] = useState("");
   const [statusConfigDraft, setStatusConfigDraft] = useState<{
-    prices: { diamond: string; gold: string; silver: string; bronze: string };
+    prices: { diamond: string; gold: string };
     limits: { diamond: string; elite: string; gold: string };
   } | null>(null);
   const { toast } = useToast();
@@ -80,16 +86,12 @@ export default function SetupPage() {
 
     const diamond = getStatus(["diamond", "diamin"]);
     const gold = getStatus(["gold"]);
-    const silver = getStatus(["silver"]);
-    const bronze = getStatus(["bronze"]);
     const elite = getStatus(["elite"]);
 
     return {
       prices: {
         diamond: String(diamond?.basePrice ?? ""),
         gold: String(gold?.basePrice ?? ""),
-        silver: String(silver?.basePrice ?? ""),
-        bronze: String(bronze?.basePrice ?? ""),
       },
       limits: {
         diamond: String(diamond?.maxPerTeam ?? 1),
@@ -120,6 +122,9 @@ export default function SetupPage() {
     [selectableStatuses, defaultStatusId],
   );
 
+  const isSingleManualPriceRequired = requiresManualPlayerPrice(selectedSingleStatus?.description);
+  const isBulkManualPriceRequired = requiresManualPlayerPrice(selectedBulkStatus?.description);
+
   useEffect(() => {
     if (!statusConfigDraft && playerStatuses.length > 0) {
       setStatusConfigDraft(buildStatusConfigDraft(playerStatuses));
@@ -135,6 +140,12 @@ export default function SetupPage() {
       setDefaultStatusId(String(selectableStatuses[0].validatePlayerStatusId));
     }
   }, [selectableStatuses, playerStatusId, defaultStatusId]);
+
+  useEffect(() => {
+    if (!isSingleManualPriceRequired) {
+      setManualPlayerPrice("");
+    }
+  }, [isSingleManualPriceRequired]);
 
   // ── Team mutations ──
   const addTeamMutation = useMutation({
@@ -175,18 +186,19 @@ export default function SetupPage() {
 
   // ── Player mutations ──
   const addPlayerMutation = useMutation({
-    mutationFn: async (data: { name: string; validatePlayerStatusId: number }) => {
+    mutationFn: async (data: { name: string; validatePlayerStatusId: number; basePrice?: number }) => {
       const res = await apiRequest("POST", "/api/players", data);
       return res.json();
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["/api/players"] });
       setPlayerName("");
+      setManualPlayerPrice("");
     },
   });
 
   const bulkAddMutation = useMutation({
-    mutationFn: async (playersList: { name: string; validatePlayerStatusId: number }[]) => {
+    mutationFn: async (playersList: { name: string; validatePlayerStatusId: number; basePrice?: number }[]) => {
       const res = await apiRequest("POST", "/api/players/bulk", {
         players: playersList,
       });
@@ -204,7 +216,7 @@ export default function SetupPage() {
 
   const saveStatusConfigMutation = useMutation({
     mutationFn: async (data: {
-      prices: { diamond: number; gold: number; silver: number; bronze: number };
+      prices: { diamond: number; gold: number };
       limits: { diamond: number; elite: number; gold: number };
     }) => {
       const res = await apiRequest("POST", "/api/player-statuses/config", data);
@@ -309,7 +321,21 @@ export default function SetupPage() {
       return;
     }
 
-    addPlayerMutation.mutate({ name, validatePlayerStatusId });
+    let basePrice: number | undefined;
+    if (isSingleManualPriceRequired) {
+      const parsedBasePrice = Number(manualPlayerPrice);
+      if (!Number.isInteger(parsedBasePrice) || parsedBasePrice <= 0) {
+        toast({
+          title: "Missing price",
+          description: "Enter a valid base price for Silver/Bronze player.",
+          variant: "destructive",
+        });
+        return;
+      }
+      basePrice = parsedBasePrice;
+    }
+
+    addPlayerMutation.mutate({ name, validatePlayerStatusId, basePrice });
   };
 
   const handleBulkAdd = () => {
@@ -323,11 +349,42 @@ export default function SetupPage() {
       return;
     }
 
-    const list = bulkText
+    const lines = bulkText
       .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .map((name) => ({ name, validatePlayerStatusId }));
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+
+    const list: { name: string; validatePlayerStatusId: number; basePrice?: number }[] = isBulkManualPriceRequired
+      ? lines.map((line) => {
+          const [namePart, pricePart] = line.split(",").map((part) => part.trim());
+          const parsedBasePrice = Number(pricePart);
+
+          return {
+            name: namePart,
+            validatePlayerStatusId,
+            basePrice: parsedBasePrice,
+          };
+        })
+      : lines.map((name) => ({ name, validatePlayerStatusId }));
+
+    if (isBulkManualPriceRequired) {
+      const hasInvalidLine = list.some(
+        (player) =>
+          !player.name ||
+          !Number.isInteger(player.basePrice as number) ||
+          (player.basePrice as number) <= 0,
+      );
+
+      if (hasInvalidLine) {
+        toast({
+          title: "Invalid bulk format",
+          description: "For Silver/Bronze bulk add, use one player per line as Name,Price",
+          variant: "destructive",
+        });
+        return;
+      }
+    }
+
     if (list.length === 0) return;
     bulkAddMutation.mutate(list);
   };
@@ -337,29 +394,27 @@ export default function SetupPage() {
 
     const diamondPrice = Number(statusConfigDraft.prices.diamond);
     const goldPrice = Number(statusConfigDraft.prices.gold);
-    const silverPrice = Number(statusConfigDraft.prices.silver);
-    const bronzePrice = Number(statusConfigDraft.prices.bronze);
 
     const diamondLimit = Number(statusConfigDraft.limits.diamond);
     const eliteLimit = Number(statusConfigDraft.limits.elite);
     const goldLimit = Number(statusConfigDraft.limits.gold);
 
-    const invalidPrice = [diamondPrice, goldPrice, silverPrice, bronzePrice].some(
+    const invalidPrice = [diamondPrice, goldPrice].some(
       (value) => !Number.isInteger(value) || value <= 0,
     );
     if (invalidPrice) {
       toast({
         title: "Invalid prices",
-        description: "All status prices must be positive whole numbers.",
+        description: "Diamond and Gold prices must be positive whole numbers.",
         variant: "destructive",
       });
       return;
     }
 
-    if (!(diamondPrice > goldPrice && goldPrice > silverPrice && silverPrice > bronzePrice)) {
+    if (!(diamondPrice > goldPrice)) {
       toast({
         title: "Invalid price order",
-        description: "Set prices so Diamond > Gold > Silver > Bronze.",
+        description: "Set prices so Diamond > Gold.",
         variant: "destructive",
       });
       return;
@@ -381,8 +436,6 @@ export default function SetupPage() {
       prices: {
         diamond: diamondPrice,
         gold: goldPrice,
-        silver: silverPrice,
-        bronze: bronzePrice,
       },
       limits: {
         diamond: diamondLimit,
@@ -577,7 +630,7 @@ export default function SetupPage() {
           <CardContent className="space-y-4">
             {statusConfigDraft ? (
               <>
-                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                   <div className="space-y-1">
                     <label className="text-xs text-muted-foreground">Diamond price</label>
                     <Input
@@ -614,44 +667,6 @@ export default function SetupPage() {
                       }
                       min={1}
                       data-testid="input-price-gold"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Silver price</label>
-                    <Input
-                      type="number"
-                      value={statusConfigDraft.prices.silver}
-                      onChange={(e) =>
-                        setStatusConfigDraft((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                prices: { ...prev.prices, silver: e.target.value },
-                              }
-                            : prev,
-                        )
-                      }
-                      min={1}
-                      data-testid="input-price-silver"
-                    />
-                  </div>
-                  <div className="space-y-1">
-                    <label className="text-xs text-muted-foreground">Bronze price</label>
-                    <Input
-                      type="number"
-                      value={statusConfigDraft.prices.bronze}
-                      onChange={(e) =>
-                        setStatusConfigDraft((prev) =>
-                          prev
-                            ? {
-                                ...prev,
-                                prices: { ...prev.prices, bronze: e.target.value },
-                              }
-                            : prev,
-                        )
-                      }
-                      min={1}
-                      data-testid="input-price-bronze"
                     />
                   </div>
                 </div>
@@ -718,7 +733,7 @@ export default function SetupPage() {
 
                 <div className="flex items-center justify-between gap-2">
                   <p className="text-xs text-muted-foreground">
-                    Rules enforced: Diamond &gt; Gold &gt; Silver &gt; Bronze. Captain is Elite.
+                    Diamond and Gold use default status pricing. Silver and Bronze pricing is set per player. Captain is Elite.
                   </p>
                   <Button
                     size="sm"
@@ -776,12 +791,29 @@ export default function SetupPage() {
                   ))}
                 </SelectContent>
               </Select>
-              <div className="h-9 min-w-24 rounded-md border border-input bg-muted/40 px-3 text-sm flex items-center justify-center whitespace-nowrap">
-                ₹{selectedSingleStatus?.basePrice ?? "-"}
-              </div>
+              {isSingleManualPriceRequired ? (
+                <Input
+                  type="number"
+                  min={1}
+                  placeholder="Price"
+                  value={manualPlayerPrice}
+                  onChange={(e) => setManualPlayerPrice(e.target.value)}
+                  className="w-28"
+                  data-testid="input-player-manual-price"
+                />
+              ) : (
+                <div className="h-9 min-w-24 rounded-md border border-input bg-muted/40 px-3 text-sm flex items-center justify-center whitespace-nowrap">
+                  ₹{selectedSingleStatus?.basePrice ?? "-"}
+                </div>
+              )}
               <Button
                 onClick={handleAddPlayer}
-                disabled={!playerName.trim() || addPlayerMutation.isPending || selectableStatuses.length === 0}
+                disabled={
+                  !playerName.trim() ||
+                  addPlayerMutation.isPending ||
+                  selectableStatuses.length === 0 ||
+                  (isSingleManualPriceRequired && !manualPlayerPrice.trim())
+                }
                 size="sm"
                 data-testid="button-add-player"
               >
@@ -797,11 +829,20 @@ export default function SetupPage() {
               </label>
               <textarea
                 className="w-full min-h-[80px] rounded-md border border-input bg-background px-3 py-2 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                placeholder={"Virat\nRohit\nDhoni\nBumrah"}
+                placeholder={
+                  isBulkManualPriceRequired
+                    ? "Virat,45\nRohit,35\nDhoni,30"
+                    : "Virat\nRohit\nDhoni\nBumrah"
+                }
                 value={bulkText}
                 onChange={(e) => setBulkText(e.target.value)}
                 data-testid="textarea-bulk-players"
               />
+              {isBulkManualPriceRequired && (
+                <p className="text-xs text-muted-foreground">
+                  For Silver/Bronze, enter one player per line as Name,Price.
+                </p>
+              )}
               <div className="flex items-center gap-2">
                 <label className="text-xs text-muted-foreground whitespace-nowrap">
                   Default status:
@@ -824,9 +865,11 @@ export default function SetupPage() {
                     ))}
                   </SelectContent>
                 </Select>
-                <div className="h-8 min-w-20 rounded-md border border-input bg-muted/40 px-2 text-xs flex items-center justify-center whitespace-nowrap">
-                  ₹{selectedBulkStatus?.basePrice ?? "-"}
-                </div>
+                {!isBulkManualPriceRequired && (
+                  <div className="h-8 min-w-20 rounded-md border border-input bg-muted/40 px-2 text-xs flex items-center justify-center whitespace-nowrap">
+                    ₹{selectedBulkStatus?.basePrice ?? "-"}
+                  </div>
+                )}
                 <Button
                   variant="secondary"
                   size="sm"
